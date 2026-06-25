@@ -704,9 +704,9 @@ static BOOL findCell(ASNodeController *nodeController, NSArray <NSString *> *ide
     UICollectionViewCell *cell = %orig;
 
     if ([cell isKindOfClass:objc_lookUpClass("_ASCollectionViewCell")]) {
-        _ASCollectionViewCell *cell = %orig;
-        if ([cell respondsToSelector:@selector(node)]) {
-            NSString *idToRemove = [[cell node] accessibilityIdentifier];
+        _ASCollectionViewCell *asCell = (_ASCollectionViewCell *)cell;
+        if ([asCell respondsToSelector:@selector(node)]) {
+            NSString *idToRemove = [[asCell node] accessibilityIdentifier];
             if ([idToRemove isEqualToString:@"statement_banner.view"] ||
                 (([idToRemove isEqualToString:@"eml.shorts-grid"] || [idToRemove isEqualToString:@"eml.shorts-shelf"]) && ytlBool(@"hideShorts"))) {
                 [self removeCellsAtIndexPath:indexPath];
@@ -715,12 +715,20 @@ static BOOL findCell(ASNodeController *nodeController, NSArray <NSString *> *ide
     } else if (([cell isKindOfClass:objc_lookUpClass("YTReelShelfCell")] && ytlBool(@"hideShorts")) ||
         ([cell isKindOfClass:objc_lookUpClass("YTHorizontalCardListCell")] && ytlBool(@"noContinueWatching"))) {
         [self removeCellsAtIndexPath:indexPath];
-    } return %orig;
+    }
+
+    return cell;
 }
 
 %new
 - (void)removeCellsAtIndexPath:(NSIndexPath *)indexPath {
-    [self deleteItemsAtIndexPaths:@[indexPath]];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (indexPath.section >= [self numberOfSections]) return;
+        if (indexPath.item >= [self numberOfItemsInSection:indexPath.section]) return;
+        [self performBatchUpdates:^{
+            [self deleteItemsAtIndexPaths:@[indexPath]];
+        } completion:nil];
+    });
 }
 %end
 
