@@ -1,3 +1,7 @@
 .theos/
 .DS_Store
 packages/*.deb
+*.ipa
+diff.txt
+HANDOFF.md
+YTClean/
