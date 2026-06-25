@@ -507,8 +507,6 @@ static NSString *GetCacheSize() {
 
         [sectionItems addObject:startup];
     }
-    
-    [sectionItems addObject:space];
 
     YTSettingsSectionItem *thanks = [YTSettingsSectionItemClass itemWithTitle:LOC(@"Contributors")
     accessibilityIdentifier:@"YTLiteSectionItem"

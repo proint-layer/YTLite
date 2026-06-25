@@ -116,6 +116,10 @@
 @property (nonatomic, assign, readonly) YTIPlayerResponse *playerData;
 @end
 
+@interface YTIItemSectionSupportedRenderers (YTLite)
+@property (nonatomic) BOOL hasHorizontalCardListRenderer;
+@end
+
 @interface MLQuickMenuVideoQualitySettingFormatConstraint : NSObject
 - (instancetype)initWithVideoQualitySetting:(int)settings formatSelectionReason:(NSInteger)reason qualityLabel:(NSString *)label;
 @end

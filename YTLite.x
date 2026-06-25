@@ -50,21 +50,27 @@ static UIImage *YTImageNamed(NSString *imageName) {
         }
     }
 
+    if ([description containsString:@"statement_banner"])
+        return nil;
+
     return %orig;
 }
 %end
 
 %hook YTSectionListViewController
 - (void)loadWithModel:(YTISectionListRenderer *)model {
-    if (ytlBool(@"noAds")) {
-        NSMutableArray <YTISectionListSupportedRenderers *> *contentsArray = model.contentsArray;
-        NSIndexSet *removeIndexes = [contentsArray indexesOfObjectsPassingTest:^BOOL(YTISectionListSupportedRenderers *renderers, NSUInteger idx, BOOL *stop) {
-            YTIItemSectionRenderer *sectionRenderer = renderers.itemSectionRenderer;
-            YTIItemSectionSupportedRenderers *firstObject = [sectionRenderer.contentsArray firstObject];
-            return firstObject.hasPromotedVideoRenderer || firstObject.hasCompactPromotedVideoRenderer || firstObject.hasPromotedVideoInlineMutedRenderer;
-        }];
-        [contentsArray removeObjectsAtIndexes:removeIndexes];
-    } %orig;
+    NSMutableArray <YTISectionListSupportedRenderers *> *contentsArray = model.contentsArray;
+    NSIndexSet *removeIndexes = [contentsArray indexesOfObjectsPassingTest:^BOOL(YTISectionListSupportedRenderers *renderers, NSUInteger idx, BOOL *stop) {
+        YTIItemSectionRenderer *sectionRenderer = renderers.itemSectionRenderer;
+        YTIItemSectionSupportedRenderers *firstObject = [sectionRenderer.contentsArray firstObject];
+        if (ytlBool(@"noAds") && (firstObject.hasPromotedVideoRenderer || firstObject.hasCompactPromotedVideoRenderer || firstObject.hasPromotedVideoInlineMutedRenderer))
+            return YES;
+        if (ytlBool(@"noContinueWatching") && firstObject.hasHorizontalCardListRenderer)
+            return YES;
+        return NO;
+    }];
+    [contentsArray removeObjectsAtIndexes:removeIndexes];
+    %orig;
 }
 %end
 
@@ -723,11 +729,10 @@ static BOOL findCell(ASNodeController *nodeController, NSArray <NSString *> *ide
 %new
 - (void)removeCellsAtIndexPath:(NSIndexPath *)indexPath {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (indexPath.section >= [self numberOfSections]) return;
-        if (indexPath.item >= [self numberOfItemsInSection:indexPath.section]) return;
-        [self performBatchUpdates:^{
-            [self deleteItemsAtIndexPaths:@[indexPath]];
-        } completion:nil];
+        UICollectionViewCell *cell = [self cellForItemAtIndexPath:indexPath];
+        if (!cell) return;
+        cell.hidden = YES;
+        cell.userInteractionEnabled = NO;
     });
 }
 %end
