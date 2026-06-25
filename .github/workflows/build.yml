@@ -41,10 +41,6 @@ on:
         description: "Integrate YouQuality"
         type: boolean
         default: false
-      enable_isponsorblock:
-        description: "Integrate iSponsorBlock"
-        type: boolean
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -165,25 +161,11 @@ jobs:
           cd tweaks/DontEatMyContent && make clean package DEBUG=0 FINALPACKAGE=1
           mv packages/*.deb ../../demc.deb
 
-      - name: Build Alderis and iSponsorBlock
-        if: ${{ inputs.enable_isponsorblock }}
-        run: |
-          cd tweaks/Alderis && make clean package DEBUG=0 FINALPACKAGE=1
-          cp .theos/obj/install/usr/lib/libcolorpicker.dylib ../../libcolorpicker.dylib
-          cp -r .theos/obj/install/Library/Frameworks/Alderis.framework ../../Alderis.framework
-          cp ../../libcolorpicker.dylib $THEOS/lib/libcolorpicker.dylib
-          cd ../iSponsorBlock && git submodule update --init --recursive
-          make clean package DEBUG=0 FINALPACKAGE=1
-          mv packages/*.deb ../../isponsorblock.deb
-
       - name: Upload built debs
         uses: actions/upload-artifact@v4
         with:
           name: built-debs
-          path: |
-            *.deb
-            *.dylib
-            *.framework
+          path: "*.deb"
           if-no-files-found: error
           retention-days: 1
 
@@ -218,8 +200,6 @@ jobs:
           for f in *.deb; do
             [[ "$f" != "ytlite.deb" ]] && tweaks="$tweaks $f"
           done
-          [ -f libcolorpicker.dylib ] && tweaks="$tweaks libcolorpicker.dylib"
-          [ -d Alderis.framework ] && tweaks="$tweaks Alderis.framework"
           cyan -i youtube.ipa -o YouTubePlus.ipa -uwef $tweaks \
             -n "${{ inputs.display_name }}" \
             -b "${{ inputs.bundle_id }}"
