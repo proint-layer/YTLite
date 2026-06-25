@@ -23,15 +23,35 @@ static NSString *GetCacheSize() {
     return [formatter stringFromByteCount:folderSize];
 }
 
-// Settings
-%hook YTAppSettingsGroupPresentationData
-+ (NSArray *)orderedGroups {
+// Settings — flat list (older YouTube)
+%hook YTAppSettingsPresentationData
++ (NSArray *)settingsCategoryOrder {
     NSArray *order = %orig;
     NSMutableArray *mutableOrder = [order mutableCopy];
     NSUInteger insertIndex = [order indexOfObject:@(1)];
     if (insertIndex != NSNotFound)
         [mutableOrder insertObject:@(YTLiteSection) atIndex:insertIndex + 1];
     return mutableOrder;
+}
+%end
+
+// Settings — grouped list (YouTube 21.x+); orderedGroups returns YTSettingsGroupData objects,
+// each with an orderedCategories array of NSNumbers inside.
+%hook YTAppSettingsGroupPresentationData
++ (NSArray *)orderedGroups {
+    NSArray *groups = %orig;
+    for (id group in groups) {
+        NSArray *categories = [group valueForKey:@"_orderedCategories"];
+        if ([categories containsObject:@(YTLiteSection)]) break;
+        NSUInteger insertIndex = [categories indexOfObject:@(1)];
+        if (insertIndex != NSNotFound) {
+            NSMutableArray *mutableCategories = [categories mutableCopy];
+            [mutableCategories insertObject:@(YTLiteSection) atIndex:insertIndex + 1];
+            [group setValue:mutableCategories forKey:@"_orderedCategories"];
+            break;
+        }
+    }
+    return groups;
 }
 %end
 
