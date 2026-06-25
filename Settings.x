@@ -24,8 +24,8 @@ static NSString *GetCacheSize() {
 }
 
 // Settings
-%hook YTAppSettingsPresentationData
-+ (NSArray *)settingsCategoryOrder {
+%hook YTAppSettingsGroupPresentationData
++ (NSArray *)orderedGroups {
     NSArray *order = %orig;
     NSMutableArray *mutableOrder = [order mutableCopy];
     NSUInteger insertIndex = [order indexOfObject:@(1)];
