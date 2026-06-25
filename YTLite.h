@@ -64,7 +64,7 @@
 @interface YTPivotBarViewController : UIViewController
 @end
 
-@interface YTAppViewController : UIViewController
+@interface YTAppViewControllerImpl : UIViewController
 @property (nonatomic, assign, readonly) YTPivotBarViewController *pivotBarViewController;
 - (void)hidePivotBar;
 - (void)showPivotBar;
@@ -75,7 +75,7 @@
 @end
 
 @interface YTPivotBarViewController ()
-@property (nonatomic, weak, readwrite) YTAppViewController *parentViewController;
+@property (nonatomic, weak, readwrite) YTAppViewControllerImpl *parentViewController;
 @property (nonatomic, copy, readwrite) NSString *selectedPivotIdentifier;
 - (YTPivotBarView *)pivotBarView;
 - (void)selectItemWithPivotIdentifier:(id)pivotIndentifier;
@@ -89,7 +89,14 @@
 @end
 
 @interface YTScrollableNavigationController : UINavigationController
-@property (nonatomic, weak, readwrite) YTAppViewController *parentViewController;
+@property (nonatomic, weak, readwrite) YTAppViewControllerImpl *parentViewController;
+@end
+
+@interface YTPlayabilityResolutionUserActionUIControllerImpl : NSObject
+- (void)confirmAlertDidPressConfirm;
+@end
+
+@interface YTVarispeedSwitchControllerImpl : NSObject
 @end
 
 @interface YTTabsViewController : UIViewController

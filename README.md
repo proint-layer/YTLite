@@ -1,22 +1,29 @@
-# YTLite
-Lightweight YouTube Enhancer
+# LibreYTLite
 
-Advanced mode can be activated inside **Version cell**. Then simply reopen YTLite settings
+A clean, open-source fork of [YTLite](https://github.com/Dayanch96/YTLite), branched from the last MIT-licensed release before the project went closed-source. Rebuilt from source without DRM, for sideloading.
 
-# How to build it yourself
-Clone this repo
+## Getting the IPA
 
-Clone __[YouTubeHeader by PoomSmart](https://github.com/PoomSmart/YouTubeHeader/)__
+Fork this repo and trigger the **Build YTLite IPA** workflow from the Actions tab. Paste a decrypted YouTube IPA URL and select which bundled tweaks to include. The patched IPA is uploaded as an artifact.
 
-Clone __[protobuf by Protocol Buffers](https://github.com/protocolbuffers/protobuf)__
+## Features
 
-cd YTLite folder and run
+- Ad blocking (pre-roll, banner, and overlay ads)
+- Background playback
+- Return YouTube Dislikes
+- YTUHD (4K / high bitrate quality unlock)
+- YouQuality (manual quality selection)
+- YTABConfig (A/B flag overrides)
+- DontEatMyContent (safe area fix)
+- Shorts hiding and controls
+- Speed controls (up to 5×)
+- Tab bar customization
+- And everything else from the original YTLite settings
 
-• '**make clean package**' to build deb for rootful device
+## Credits
 
-• '**make clean package ROOTLESS=1**' to build deb for rootless device
-
-
-<p align="center">
-<img src=https://github-production-user-asset-6210df.s3.amazonaws.com/38832025/248051008-4cef3fb5-ab24-4d8c-bc7f-122b1df95996.png?raw=true) />
-</p>
+- [Dayanch96](https://github.com/Dayanch96) — original YTLite
+- [PoomSmart](https://github.com/PoomSmart) — YouTubeHeader, YouGroupSettings, YTVideoOverlay, Return-YouTube-Dislikes, YTABConfig, YouQuality
+- [Tonwalter888](https://github.com/Tonwalter888) — YTUHD
+- [therealFoxster](https://github.com/therealFoxster) — DontEatMyContent
+- [Dan Pashin](https://github.com/danpashin) — special thanks
