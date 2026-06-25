@@ -1,6 +1,3 @@
-[submodule "tweaks/YouPiP"]
-	path = tweaks/YouPiP
-	url = https://github.com/PoomSmart/YouPiP.git
 [submodule "tweaks/YouGroupSettings"]
 	path = tweaks/YouGroupSettings
 	url = https://github.com/PoomSmart/YouGroupSettings.git
