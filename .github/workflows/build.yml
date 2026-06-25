@@ -54,6 +54,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Install dependencies
         run: brew install make ldid dpkg
@@ -102,73 +104,62 @@ jobs:
           make clean package DEBUG=0 FINALPACKAGE=1
           mv packages/*.deb ytlite.deb
 
-      - name: Clone YouTubeHeader into Theos (for optional tweaks)
+      - name: Install YouTubeHeader and PSHeader into Theos (for optional tweaks)
         if: ${{ inputs.enable_youpip || inputs.enable_ytuhd || inputs.enable_yq || inputs.enable_ryd || inputs.enable_ytabc || inputs.enable_demc }}
         run: |
-          cd $THEOS/include && git clone --quiet --depth=1 https://github.com/PoomSmart/YouTubeHeader.git
+          cp -r ../YouTubeHeader $THEOS/include/YouTubeHeader
           if [ "${{ inputs.enable_demc }}" = "true" ]; then
-            cp -r "$THEOS/include/YouTubeHeader" "$THEOS/include/YTHeaders"
+            cp -r ../YouTubeHeader $THEOS/include/YTHeaders
           fi
+          git clone --quiet --depth=1 https://github.com/PoomSmart/PSHeader.git $THEOS/include/PSHeader
 
-      - name: Clone PSHeader
-        if: ${{ inputs.enable_youpip || inputs.enable_ytuhd || inputs.enable_yq || inputs.enable_ryd || inputs.enable_ytabc || inputs.enable_demc }}
-        run: cd $THEOS/include && git clone --quiet --depth=1 https://github.com/PoomSmart/PSHeader.git
-
-      - name: Clone and build YouPiP
+      - name: Build YouPiP
         if: ${{ inputs.enable_youpip }}
         run: |
-          git clone --quiet --depth=1 https://github.com/PoomSmart/YouPiP.git
-          cd YouPiP && make clean package DEBUG=0 FINALPACKAGE=1
-          mv packages/*.deb ../youpip.deb
+          cd tweaks/YouPiP && make clean package DEBUG=0 FINALPACKAGE=1
+          mv packages/*.deb ../../youpip.deb
 
-      - name: Clone and build YTUHD
+      - name: Build YTUHD
         if: ${{ inputs.enable_ytuhd }}
         run: |
-          git clone --quiet --depth=1 https://github.com/Tonwalter888/YTUHD.git
-          cd YTUHD && make clean package DEBUG=0 FINALPACKAGE=1
-          mv packages/*.deb ../ytuhd.deb
+          cd tweaks/YTUHD && make clean package DEBUG=0 FINALPACKAGE=1
+          mv packages/*.deb ../../ytuhd.deb
 
-      - name: Clone and build Return YouTube Dislikes
+      - name: Build Return YouTube Dislikes
         if: ${{ inputs.enable_ryd }}
         run: |
-          git clone --quiet --depth=1 https://github.com/PoomSmart/Return-YouTube-Dislikes.git
-          cd Return-YouTube-Dislikes && make clean package DEBUG=0 FINALPACKAGE=1
-          mv packages/*.deb ../ryd.deb
+          cd tweaks/Return-YouTube-Dislikes && make clean package DEBUG=0 FINALPACKAGE=1
+          mv packages/*.deb ../../ryd.deb
 
-      - name: Clone and build YTABConfig
+      - name: Build YTABConfig
         if: ${{ inputs.enable_ytabc }}
         run: |
-          git clone --quiet --depth=1 https://github.com/PoomSmart/YTABConfig.git
-          cd YTABConfig && make clean package DEBUG=0 FINALPACKAGE=1
-          mv packages/*.deb ../ytabc.deb
+          cd tweaks/YTABConfig && make clean package DEBUG=0 FINALPACKAGE=1
+          mv packages/*.deb ../../ytabc.deb
 
-      - name: Clone and build YouGroupSettings
+      - name: Build YouGroupSettings
         if: ${{ inputs.enable_youpip || inputs.enable_ytuhd || inputs.enable_yq || inputs.enable_ryd || inputs.enable_demc }}
         run: |
-          git clone --quiet --depth=1 https://github.com/PoomSmart/YouGroupSettings.git
-          cd YouGroupSettings && make clean package DEBUG=0 FINALPACKAGE=1
-          mv packages/*.deb ../ygs.deb
+          cd tweaks/YouGroupSettings && make clean package DEBUG=0 FINALPACKAGE=1
+          mv packages/*.deb ../../ygs.deb
 
-      - name: Clone and build YouQuality
+      - name: Build YouQuality
         if: ${{ inputs.enable_yq }}
         run: |
-          git clone --quiet --depth=1 https://github.com/PoomSmart/YouQuality.git
-          cd YouQuality && make clean package DEBUG=0 FINALPACKAGE=1
-          mv packages/*.deb ../yq.deb
+          cd tweaks/YouQuality && make clean package DEBUG=0 FINALPACKAGE=1
+          mv packages/*.deb ../../yq.deb
 
-      - name: Clone and build YTVideoOverlay
+      - name: Build YTVideoOverlay
         if: ${{ inputs.enable_youpip || inputs.enable_ytuhd || inputs.enable_yq }}
         run: |
-          git clone --quiet --depth=1 https://github.com/PoomSmart/YTVideoOverlay.git
-          cd YTVideoOverlay && make clean package DEBUG=0 FINALPACKAGE=1
-          mv packages/*.deb ../ytvo.deb
+          cd tweaks/YTVideoOverlay && make clean package DEBUG=0 FINALPACKAGE=1
+          mv packages/*.deb ../../ytvo.deb
 
-      - name: Clone and build DontEatMyContent
+      - name: Build DontEatMyContent
         if: ${{ inputs.enable_demc }}
         run: |
-          git clone --quiet --depth=1 https://github.com/therealFoxster/DontEatMyContent.git
-          cd DontEatMyContent && make clean package DEBUG=0 FINALPACKAGE=1
-          mv packages/*.deb ../demc.deb
+          cd tweaks/DontEatMyContent && make clean package DEBUG=0 FINALPACKAGE=1
+          mv packages/*.deb ../../demc.deb
 
       - name: Upload built debs
         uses: actions/upload-artifact@v4
