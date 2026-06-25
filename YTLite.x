@@ -83,7 +83,7 @@ static UIImage *YTImageNamed(NSString *imageName) {
 - (void)addEventHandlers {}
 %end
 
-%hook YTPromoThrottleController
+%hook YTPromoThrottleControllerImpl
 - (BOOL)canShowThrottledPromo { return NO; }
 - (BOOL)canShowThrottledPromoWithFrequencyCap:(id)arg1 { return NO; }
 - (BOOL)canShowThrottledPromoWithFrequencyCaps:(id)arg1 { return NO; }
@@ -307,12 +307,12 @@ static UIImage *YTImageNamed(NSString *imageName) {
 %end
 
 // Skip Content Warning (https://github.com/qnblackcat/uYouPlus/blob/main/uYouPlus.xm#L452-L454)
-%hook YTPlayabilityResolutionUserActionUIController
+%hook YTPlayabilityResolutionUserActionUIControllerImpl
 - (void)showConfirmAlert { ytlBool(@"noContentWarning") ? [self confirmAlertDidPressConfirm] : %orig; }
 %end
 
 // Classic Video Quality (https://github.com/PoomSmart/YTClassicVideoQuality)
-%hook YTVideoQualitySwitchControllerFactory
+%hook YTVideoQualitySwitchControllerFactoryImpl
 - (id)videoQualitySwitchControllerWithParentResponder:(id)responder {
     Class originalClass = %c(YTVideoQualitySwitchOriginalController);
     return ytlBool(@"classicQuality") && originalClass ? [[originalClass alloc] initWithParentResponder:responder] : %orig;
@@ -320,7 +320,7 @@ static UIImage *YTImageNamed(NSString *imageName) {
 %end
 
 // Extra Speed Options
-%hook YTVarispeedSwitchController
+%hook YTVarispeedSwitchControllerImpl
 - (void)setDelegate:(id)arg1 {
     NSMutableArray *optionsCopy = [[self valueForKey:@"_options"] mutableCopy];
     NSArray *speedOptions = @[@"2.5", @"3", @"3.5", @"4", @"5"];
@@ -761,7 +761,7 @@ static BOOL findCell(ASNodeController *nodeController, NSArray <NSString *> *ide
 %end
 
 // Dont Startup Shorts
-%hook YTShortsStartupCoordinator
+%hook YTShortsStartupCoordinatorImpl
 - (id)evaluateResumeToShorts { return ytlBool(@"resumeShorts") ? nil : %orig; }
 %end
 
@@ -818,7 +818,7 @@ static BOOL isOverlayShown = YES;
         YTShortsPlayerViewController *shortsPlayerVC = (YTShortsPlayerViewController *)self.playerViewDelegate.parentViewController;
         YTReelContentView *contentView = (YTReelContentView *)shortsPlayerVC.view;
         UIWindow *mainWindow = [[[UIApplication sharedApplication] delegate] window];
-        YTAppViewController *appVC = (YTAppViewController *)mainWindow.rootViewController;
+        YTAppViewControllerImpl *appVC = (YTAppViewControllerImpl *)mainWindow.rootViewController;
 
         if (gesture.scale > 1) {
             if (!ytlBool(@"shortsOnlyMode")) [appVC hidePivotBar];
@@ -862,7 +862,7 @@ static BOOL isOverlayShown = YES;
         [[%c(YTToastResponderEvent) eventWithMessage:LOC(@"ShortsModeTurnedOff") firstResponder:[%c(YTUIUtils) topViewControllerForPresenting]] send];
 
         UIWindow *mainWindow = [[[UIApplication sharedApplication] delegate] window];
-        YTAppViewController *appVC = (YTAppViewController *)mainWindow.rootViewController;
+        YTAppViewControllerImpl *appVC = (YTAppViewControllerImpl *)mainWindow.rootViewController;
         [appVC performSelector:@selector(showPivotBar) withObject:nil afterDelay:1.0];
     }
 }
@@ -1237,7 +1237,7 @@ BOOL isTabSelected = NO;
 }
 %end
 
-%hook YTAppViewController
+%hook YTAppViewControllerImpl
 - (void)showPivotBar {
     if (!ytlBool(@"shortsOnlyMode")) {
         %orig;
