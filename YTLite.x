@@ -38,39 +38,125 @@ static UIImage *YTImageNamed(NSString *imageName) {
 
     NSString *description = [self description];
 
-    NSArray *ads = @[@"brand_promo", @"product_carousel", @"product_engagement_panel", @"product_item", @"text_search_ad", @"text_image_button_layout", @"carousel_headered_layout", @"carousel_footered_layout", @"square_image_layout", @"landscape_image_wide_button_layout", @"feed_ad_metadata"];
-    if (ytlBool(@"noAds") && [ads containsObject:description]) {
-        return [NSData data];
+    NSArray *ads = @[@"brand_promo", @"product_carousel", @"product_engagement_panel", @"product_item",
+                     @"text_search_ad", @"text_image_button_layout", @"carousel_headered_layout",
+                     @"carousel_footered_layout", @"square_image_layout", @"landscape_image_wide_button_layout",
+                     @"feed_ad_metadata", @"statement_banner"];
+    for (NSString *ad in ads) {
+        if (ytlBool(@"noAds") && [description containsString:ad])
+            return [NSData data];
     }
 
     NSArray *shortsToRemove = @[@"shorts_shelf.eml", @"shorts_video_cell.eml", @"6Shorts"];
     for (NSString *shorts in shortsToRemove) {
-        if (ytlBool(@"hideShorts") && [description containsString:shorts] && ![description containsString:@"history*"]) {
+        if (ytlBool(@"hideShorts") && [description containsString:shorts] && ![description containsString:@"history*"])
             return nil;
-        }
     }
-
-    if ([description containsString:@"statement_banner"])
-        return nil;
 
     return %orig;
 }
 %end
 
-%hook YTSectionListViewController
-- (void)loadWithModel:(YTISectionListRenderer *)model {
-    NSMutableArray <YTISectionListSupportedRenderers *> *contentsArray = model.contentsArray;
-    NSIndexSet *removeIndexes = [contentsArray indexesOfObjectsPassingTest:^BOOL(YTISectionListSupportedRenderers *renderers, NSUInteger idx, BOOL *stop) {
-        YTIItemSectionRenderer *sectionRenderer = renderers.itemSectionRenderer;
-        YTIItemSectionSupportedRenderers *firstObject = [sectionRenderer.contentsArray firstObject];
-        if (ytlBool(@"noAds") && (firstObject.hasPromotedVideoRenderer || firstObject.hasCompactPromotedVideoRenderer || firstObject.hasPromotedVideoInlineMutedRenderer))
+// Returns YES if an element renderer is an ad (EML-based, YouTube 19+)
+static BOOL isAdElementRenderer(YTIElementRenderer *elementRenderer) {
+    if (!elementRenderer) return NO;
+    if ([elementRenderer respondsToSelector:@selector(hasCompatibilityOptions)] &&
+        elementRenderer.hasCompatibilityOptions &&
+        elementRenderer.compatibilityOptions.hasAdLoggingData)
+        return YES;
+    NSString *desc = [elementRenderer description];
+    NSArray *adStrings = @[@"brand_promo", @"product_carousel", @"product_engagement_panel",
+                           @"product_item", @"text_search_ad", @"text_image_button_layout",
+                           @"carousel_headered_layout", @"carousel_footered_layout",
+                           @"square_image_layout", @"landscape_image_wide_button_layout",
+                           @"feed_ad_metadata", @"statement_banner", @"eml.expandable_metadata"];
+    for (NSString *adStr in adStrings) {
+        if ([desc containsString:adStr]) return YES;
+    }
+    return NO;
+}
+
+// Filters ad sections and unwanted shelves from a section renderer array (makes a copy, safe for ASDK)
+static NSMutableArray *ytlFilteredSections(NSArray *array) {
+    BOOL filterAds = ytlBool(@"noAds");
+    BOOL filterContinueWatching = ytlBool(@"noContinueWatching");
+
+    if (!filterAds && !filterContinueWatching)
+        return [array mutableCopy];
+
+    NSMutableArray *filtered = [array mutableCopy];
+    NSIndexSet *removeIndexes = [filtered indexesOfObjectsPassingTest:^BOOL(id sectionRenderer, NSUInteger idx, BOOL *stop) {
+        // Filter ads embedded inside shelf renderers
+        if (filterAds && [sectionRenderer isKindOfClass:%c(YTIShelfRenderer)]) {
+            YTIHorizontalListRenderer *hList = ((YTIShelfRenderer *)sectionRenderer).content.horizontalListRenderer;
+            NSMutableArray *items = hList.itemsArray;
+            NSIndexSet *adIndexes = [items indexesOfObjectsPassingTest:^BOOL(YTIHorizontalListSupportedRenderers *item, NSUInteger i, BOOL *s) {
+                return isAdElementRenderer(item.elementRenderer);
+            }];
+            [items removeObjectsAtIndexes:adIndexes];
+        }
+
+        if (![sectionRenderer isKindOfClass:%c(YTIItemSectionRenderer)])
+            return NO;
+
+        YTIItemSectionRenderer *section = (YTIItemSectionRenderer *)sectionRenderer;
+        NSMutableArray *contents = section.contentsArray;
+
+        // Filter ad items within multi-item sections
+        if (filterAds && contents.count > 1) {
+            NSIndexSet *adIndexes = [contents indexesOfObjectsPassingTest:^BOOL(YTIItemSectionSupportedRenderers *item, NSUInteger i, BOOL *s) {
+                return isAdElementRenderer(item.elementRenderer);
+            }];
+            [contents removeObjectsAtIndexes:adIndexes];
+        }
+
+        YTIItemSectionSupportedRenderers *firstItem = contents.firstObject;
+        YTIElementRenderer *elementRenderer = firstItem.elementRenderer;
+
+        // EML-based ad check (YouTube 19+)
+        if (filterAds && isAdElementRenderer(elementRenderer))
             return YES;
-        if (ytlBool(@"noContinueWatching") && firstObject.hasHorizontalCardListRenderer)
+
+        // Legacy typed-renderer ad check (older YouTube)
+        if (filterAds && (firstItem.hasPromotedVideoRenderer ||
+                          firstItem.hasCompactPromotedVideoRenderer ||
+                          firstItem.hasPromotedVideoInlineMutedRenderer))
             return YES;
+
+        // Horizontal card list shelf (Continue Watching, Explore different subjects, etc.)
+        if (filterContinueWatching) {
+            NSString *desc = [elementRenderer description];
+            if ([desc containsString:@"horizontal_card_list"])
+                return YES;
+        }
+
         return NO;
     }];
-    [contentsArray removeObjectsAtIndexes:removeIndexes];
+    [filtered removeObjectsAtIndexes:removeIndexes];
+    return filtered;
+}
+
+// Hook YTInnerTubeCollectionViewController (parent of YTSectionListViewController) to filter sections
+// at the rendered-state level — safe for ASDK, operates on a copy not the raw proto model
+%hook YTInnerTubeCollectionViewController
+- (void)displaySectionsWithReloadingSectionControllerByRenderer:(id)renderer {
+    NSMutableArray *sectionRenderers = [self valueForKey:@"_sectionRenderers"];
+    [self setValue:ytlFilteredSections(sectionRenderers) forKey:@"_sectionRenderers"];
     %orig;
+}
+- (void)addSectionsFromArray:(NSArray *)array {
+    %orig(ytlFilteredSections(array));
+}
+%end
+
+// Remove statement_banner and expandable_metadata promo views at the view layer
+%hook _ASDisplayView
+- (void)didMoveToWindow {
+    %orig;
+    NSString *identifier = self.accessibilityIdentifier;
+    if ([identifier isEqualToString:@"statement_banner.view"] ||
+        [identifier isEqualToString:@"eml.expandable_metadata.vpp"])
+        [self removeFromSuperview];
 }
 %end
 

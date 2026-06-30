@@ -116,8 +116,9 @@
 @property (nonatomic, assign, readonly) YTIPlayerResponse *playerData;
 @end
 
-@interface YTIItemSectionSupportedRenderers (YTLite)
-@property (nonatomic) BOOL hasHorizontalCardListRenderer;
+@interface YTInnerTubeCollectionViewController (YTLite)
+- (void)displaySectionsWithReloadingSectionControllerByRenderer:(id)renderer;
+- (void)addSectionsFromArray:(NSArray *)array;
 @end
 
 @interface MLQuickMenuVideoQualitySettingFormatConstraint : NSObject
