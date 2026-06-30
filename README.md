@@ -24,6 +24,11 @@ Fork this repo and trigger the **Build YTLite IPA** workflow from the Actions ta
 
 - [Dayanch96](https://github.com/Dayanch96) — original YTLite
 - [PoomSmart](https://github.com/PoomSmart) — YouTubeHeader, YouGroupSettings, YTVideoOverlay, Return-YouTube-Dislikes, YTABConfig, YouQuality
+- [arichornlover](https://github.com/arichornlover/uYouEnhanced) — uYouEnhanced (EML-based feed filtering approach)
 - [Tonwalter888](https://github.com/Tonwalter888) — YTUHD
 - [therealFoxster](https://github.com/therealFoxster) — DontEatMyContent
 - [Dan Pashin](https://github.com/danpashin) — special thanks
+
+## AI Attribution
+
+All code in this fork from v3.0 onward was written entirely by Claude (Anthropic). No code was manually authored by the maintainer.

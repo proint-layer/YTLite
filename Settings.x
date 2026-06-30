@@ -540,6 +540,7 @@ static NSString *GetCacheSize() {
         NSArray <YTSettingsSectionItem *> *rows = @[
             [self linkWithTitle:@"PoomSmart" description:@"YouTube-X, YTNoPremium, YTClassicVideoQuality, YTShortsProgress, YTReExplore, SkipContentWarning, YTAutoFullscreen, YouTubeHeaders" link:@"https://github.com/PoomSmart/"],
             [self linkWithTitle:@"MiRO92" description:@"YTNoShorts" link:@"https://github.com/MiRO92/YTNoShorts"],
+            [self linkWithTitle:@"arichornlover" description:@"uYouEnhanced (feed filtering approach)" link:@"https://github.com/arichornlover/uYouEnhanced"],
             [self linkWithTitle:@"Tony Million" description:@"Reachability" link:@"https://github.com/tonymillion/Reachability"],
             [self linkWithTitle:@"jkhsjdhjs" description:@"YouTube Native Share" link:@"https://github.com/jkhsjdhjs/youtube-native-share"]
         ];

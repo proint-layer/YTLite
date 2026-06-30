@@ -78,6 +78,7 @@ static BOOL isAdElementRenderer(YTIElementRenderer *elementRenderer) {
 
 // Filters ad sections and unwanted shelves from a section renderer array (makes a copy, safe for ASDK)
 static NSMutableArray *ytlFilteredSections(NSArray *array) {
+    if (!array) return nil;
     BOOL filterAds = ytlBool(@"noAds");
     BOOL filterContinueWatching = ytlBool(@"noContinueWatching");
 
@@ -141,11 +142,13 @@ static NSMutableArray *ytlFilteredSections(NSArray *array) {
 %hook YTInnerTubeCollectionViewController
 - (void)displaySectionsWithReloadingSectionControllerByRenderer:(id)renderer {
     NSMutableArray *sectionRenderers = [self valueForKey:@"_sectionRenderers"];
-    [self setValue:ytlFilteredSections(sectionRenderers) forKey:@"_sectionRenderers"];
+    NSMutableArray *filtered = ytlFilteredSections(sectionRenderers);
+    if (filtered) [self setValue:filtered forKey:@"_sectionRenderers"];
     %orig;
 }
 - (void)addSectionsFromArray:(NSArray *)array {
-    %orig(ytlFilteredSections(array));
+    NSMutableArray *filtered = ytlFilteredSections(array);
+    %orig(filtered ?: array);
 }
 %end
 
