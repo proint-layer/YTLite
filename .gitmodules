@@ -19,3 +19,9 @@
 [submodule "tweaks/YTUHD"]
 	path = tweaks/YTUHD
 	url = https://github.com/Tonwalter888/YTUHD.git
+[submodule "tweaks/iSponsorBlock"]
+	path = tweaks/iSponsorBlock
+	url = https://github.com/Galactic-Dev/iSponsorBlock.git
+[submodule "tweaks/Alderis"]
+	path = tweaks/Alderis
+	url = https://github.com/hbang/Alderis.git

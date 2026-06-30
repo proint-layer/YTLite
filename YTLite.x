@@ -152,13 +152,13 @@ static NSMutableArray *ytlFilteredSections(NSArray *array) {
 }
 %end
 
-// Remove statement_banner and expandable_metadata promo views at the view layer
+// Remove statement_banner promo views at the view layer (only when noAds is on)
 %hook _ASDisplayView
 - (void)didMoveToWindow {
     %orig;
+    if (!ytlBool(@"noAds")) return;
     NSString *identifier = self.accessibilityIdentifier;
-    if ([identifier isEqualToString:@"statement_banner.view"] ||
-        [identifier isEqualToString:@"eml.expandable_metadata.vpp"])
+    if ([identifier isEqualToString:@"statement_banner.view"])
         [self removeFromSuperview];
 }
 %end
