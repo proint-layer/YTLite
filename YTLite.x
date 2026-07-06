@@ -80,7 +80,7 @@ static BOOL isAdElementRenderer(YTIElementRenderer *elementRenderer) {
                            @"product_item", @"text_search_ad", @"text_image_button_layout",
                            @"carousel_headered_layout", @"carousel_footered_layout",
                            @"square_image_layout", @"landscape_image_wide_button_layout",
-                           @"feed_ad_metadata", @"statement_banner", @"eml.expandable_metadata",
+                           @"feed_ad_metadata", @"statement_banner",
                            @"ad_badge", @"promoted_sparkles_text_search_ad",
                            @"shopping_companion", @"ads_video_bar"];
     for (NSString *adStr in adStrings) {
@@ -943,6 +943,35 @@ static BOOL isOverlayShown = YES;
 }
 %end
 
+// Strips YouTube CDN size params (=wN, =sN, =wN-hM-...) to request original/max resolution.
+// Google's image serving API returns the full-size original when no size param is present.
+static NSString *ytMaxResURLString(NSString *urlString) {
+    NSRange eqRange = [urlString rangeOfString:@"=" options:NSBackwardsSearch];
+    if (eqRange.location == NSNotFound) return urlString;
+    NSString *afterEq = [urlString substringFromIndex:eqRange.location + 1];
+    if (afterEq.length == 0) return urlString;
+    unichar first = [afterEq characterAtIndex:0];
+    if (first == 'w' || first == 'h' || first == 's' || first == 'd' || first == 'n') {
+        return [urlString substringToIndex:eqRange.location];
+    }
+    return urlString;
+}
+
+// Walks an ASDisplayNode tree depth-first to find the first loaded ASNetworkImageNode URL.
+static NSURL *findImageURLInNode(ASDisplayNode *node, int depth) {
+    if (!node || depth > 8) return nil;
+    Class imgClass = NSClassFromString(@"ASNetworkImageNode");
+    if (imgClass && [node isKindOfClass:imgClass]) {
+        NSURL *url = ((ASNetworkImageNode *)node).URL;
+        if (url) return url;
+    }
+    for (ASDisplayNode *child in node.yogaChildren) {
+        NSURL *url = findImageURLInNode(child, depth + 1);
+        if (url) return url;
+    }
+    return nil;
+}
+
 static void downloadImageFromURL(UIResponder *responder, NSURL *URL, BOOL download) {
     NSString *URLString = URL.absoluteString;
 
@@ -958,7 +987,7 @@ static void downloadImageFromURL(UIResponder *responder, NSURL *URL, BOOL downlo
             downloadURL = [NSURL URLWithString:newURL];
         }
     } else {
-        downloadURL = URL;
+        downloadURL = [NSURL URLWithString:ytMaxResURLString(URLString)];
     }
 
     NSURLSession *session = [NSURLSession sharedSession];
@@ -1132,12 +1161,13 @@ static void genImageFromLayer(CALayer *layer, UIColor *backgroundColor, void (^c
         ELMContainerNode *nodeForLayer = (ELMContainerNode *)self.keepalive_node.yogaChildren[0];
         ELMContainerNode *containerNode = (ELMContainerNode *)self.keepalive_node;
         NSString *text = containerNode.copiedComment;
-        NSURL *URL = containerNode.copiedURL;
+        // Prefer URL captured by YTImageZoomNode hook; fall back to scanning the node tree directly.
+        NSURL *URL = containerNode.copiedURL ?: findImageURLInNode((ASDisplayNode *)containerNode, 0);
         CALayer *layer = nodeForLayer.layer;
         UIColor *backgroundColor = containerNode.closestViewController.view.backgroundColor;
 
         YTDefaultSheetController *sheetController = [%c(YTDefaultSheetController) sheetControllerWithParentResponder:nil];
-        
+
         [sheetController addAction:[%c(YTActionSheetAction) actionWithTitle:LOC(@"CopyPostText") iconImage:YTImageNamed(@"yt_outline_message_bubble_right_24pt") style:0 handler:^ {
             if (text) {
                 [UIPasteboard generalPasteboard].string = text;
