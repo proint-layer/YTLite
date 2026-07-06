@@ -17,6 +17,7 @@ static UIImage *YTImageNamed(NSString *imageName) {
 // Disable Ads
 %hook YTIPlayerResponse
 - (BOOL)isMonetized { return ytlBool(@"noAds") ? NO : YES; }
+- (NSMutableArray *)playerAdsArray { return ytlBool(@"noAds") ? [NSMutableArray array] : %orig; }
 %end
 
 %hook YTDataUtils
@@ -32,6 +33,15 @@ static UIImage *YTImageNamed(NSString *imageName) {
 - (void)decorateContext:(id)context { if (!ytlBool(@"noAds")) %orig; }
 %end
 
+%hook YTPlaybackConfig
+- (void)setEnablePlayerAdUIRendering:(BOOL)enable { %orig(ytlBool(@"noAds") ? NO : enable); }
+%end
+
+%hook YTAdController
+- (void)startAdBreak:(id)arg1 { if (!ytlBool(@"noAds")) %orig; }
+- (void)skipAd { if (!ytlBool(@"noAds")) %orig; }
+%end
+
 %hook YTIElementRenderer
 - (NSData *)elementData {
     if (self.hasCompatibilityOptions && self.compatibilityOptions.hasAdLoggingData && ytlBool(@"noAds")) return nil;
@@ -41,7 +51,8 @@ static UIImage *YTImageNamed(NSString *imageName) {
     NSArray *ads = @[@"brand_promo", @"product_carousel", @"product_engagement_panel", @"product_item",
                      @"text_search_ad", @"text_image_button_layout", @"carousel_headered_layout",
                      @"carousel_footered_layout", @"square_image_layout", @"landscape_image_wide_button_layout",
-                     @"feed_ad_metadata", @"statement_banner"];
+                     @"feed_ad_metadata", @"statement_banner", @"ad_badge", @"promoted_sparkles_text_search_ad",
+                     @"shopping_companion", @"ads_video_bar"];
     for (NSString *ad in ads) {
         if (ytlBool(@"noAds") && [description containsString:ad])
             return [NSData data];
@@ -69,7 +80,9 @@ static BOOL isAdElementRenderer(YTIElementRenderer *elementRenderer) {
                            @"product_item", @"text_search_ad", @"text_image_button_layout",
                            @"carousel_headered_layout", @"carousel_footered_layout",
                            @"square_image_layout", @"landscape_image_wide_button_layout",
-                           @"feed_ad_metadata", @"statement_banner", @"eml.expandable_metadata"];
+                           @"feed_ad_metadata", @"statement_banner", @"eml.expandable_metadata",
+                           @"ad_badge", @"promoted_sparkles_text_search_ad",
+                           @"shopping_companion", @"ads_video_bar"];
     for (NSString *adStr in adStrings) {
         if ([desc containsString:adStr]) return YES;
     }
