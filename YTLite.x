@@ -1212,6 +1212,15 @@ static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
 // "Posts from …'s Community" carousel), then requires the point to actually fall inside a
 // large-enough image's frame. Precise: tapping text/"read more"/empty area or an avatar
 // yields nil, so only tapping the attached photo opens the viewer.
+// A photo attachment we should open. Excludes video thumbnails (i.ytimg.com/vi/…), which
+// are video attachments — tapping those should play the video, not open a still image.
+static BOOL ytlIsPostPhotoURL(NSURL *u) {
+    if (!u) return NO;
+    NSString *s = u.absoluteString;
+    if ([s containsString:@"i.ytimg.com"] || [s containsString:@"/vi/"]) return NO;
+    return YES;
+}
+
 static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
     UIView *v = [rootView hitTest:point withEvent:nil];
     for (int i = 0; v && i < 12; i++) {
@@ -1220,12 +1229,12 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
             if (node) {
                 CGPoint p = [rootView convertPoint:point toView:v];
                 NSURL *inner = imageURLAtPoint(node, p, 0);
-                if (inner) return inner;
+                if (inner) return ytlIsPostPhotoURL(inner) ? inner : nil;
                 // The hit view itself may be the (layer-backed) image node.
                 NSURL *own = nodeImageURL(node);
                 if (own && v.bounds.size.width >= kYTLMinImageEdge &&
                     v.bounds.size.height >= kYTLMinImageEdge && CGRectContainsPoint(v.bounds, p))
-                    return own;
+                    return ytlIsPostPhotoURL(own) ? own : nil;
             }
         }
         v = v.superview;
@@ -1239,7 +1248,7 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 // experiment iosPostImageGalleryStart and does nothing when that experiment is off.
 // The current closed-source YTLite 5.2.1 solves this the same way: it ships its own
 // viewer (DVNImageViewController) instead of relying on the native path.
-@interface YTLImageViewer : UIViewController <UIScrollViewDelegate>
+@interface YTLImageViewer : UIViewController <UIScrollViewDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIImageView *imageView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
@@ -1247,6 +1256,7 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 @property (nonatomic, strong) UIButton *saveButton;
 @property (nonatomic, strong) UIButton *shareButton;
 @property (nonatomic, strong) NSURL *sourceURL;
+@property (nonatomic, strong) NSData *imageData;
 + (void)presentWithURL:(NSURL *)url from:(UIViewController *)presenter;
 @end
 
@@ -1319,6 +1329,11 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
     [singleTap requireGestureRecognizerToFail:doubleTap];
     [self.view addGestureRecognizer:singleTap];
 
+    // Swipe up/down to dismiss (interactive drag + fade), when not zoomed in.
+    UIPanGestureRecognizer *dismissPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleDismissPan:)];
+    dismissPan.delegate = self;
+    [self.view addGestureRecognizer:dismissPan];
+
     [self loadImage];
 }
 
@@ -1353,6 +1368,7 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.spinner stopAnimating];
             if (image) {
+                self.imageData = data;
                 self.imageView.image = image;
             } else {
                 [self closeTapped];
@@ -1385,13 +1401,71 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 
 - (void)closeTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
 
+- (BOOL)isZoomedIn {
+    return self.scrollView.zoomScale > self.scrollView.minimumZoomScale + 0.01;
+}
+
+// Only start the dismiss-pan on a mostly-vertical drag while not zoomed; otherwise let
+// the scroll view handle panning (zoomed scrolling).
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g {
+    if ([g isKindOfClass:[UIPanGestureRecognizer class]] && g.view == self.view) {
+        if ([self isZoomedIn]) return NO;
+        CGPoint v = [(UIPanGestureRecognizer *)g velocityInView:self.view];
+        return fabs(v.y) > fabs(v.x);
+    }
+    return YES;
+}
+
+- (void)handleDismissPan:(UIPanGestureRecognizer *)g {
+    if ([self isZoomedIn]) return;
+    CGPoint t = [g translationInView:self.view];
+    switch (g.state) {
+        case UIGestureRecognizerStateChanged: {
+            self.scrollView.transform = CGAffineTransformMakeTranslation(0, t.y);
+            CGFloat progress = MIN(1.0, fabs(t.y) / 320.0);
+            self.view.backgroundColor = [UIColor colorWithWhite:0.0 alpha:1.0 - progress * 0.75];
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled: {
+            CGPoint vel = [g velocityInView:self.view];
+            if (fabs(t.y) > 120.0 || fabs(vel.y) > 800.0) {
+                // Fling the image off in the drag direction, then dismiss.
+                CGFloat dir = (t.y + vel.y) >= 0 ? 1.0 : -1.0;
+                [UIView animateWithDuration:0.2 animations:^{
+                    self.scrollView.transform = CGAffineTransformMakeTranslation(0, dir * self.view.bounds.size.height);
+                    self.view.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.0];
+                } completion:^(BOOL finished) {
+                    [self dismissViewControllerAnimated:NO completion:nil];
+                }];
+            } else {
+                [UIView animateWithDuration:0.25 animations:^{
+                    self.scrollView.transform = CGAffineTransformIdentity;
+                    self.view.backgroundColor = [UIColor blackColor];
+                }];
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
 - (void)saveTapped {
     UIImage *image = self.imageView.image;
-    if (!image) return;
+    if (!image && !self.imageData) return;
+    NSData *data = self.imageData;
     ytlEnsurePhotosAuth(^(BOOL granted) {
         if (!granted) { [self showSaveResult:NO error:[NSError errorWithDomain:@"YTLite" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Photos access denied"}]]; return; }
         [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-            [PHAssetChangeRequest creationRequestForAssetFromImage:image];
+            // Save the original downloaded bytes as a resource. creationRequestForAssetFromImage:
+            // re-encodes the UIImage and fails validation here (PHPhotosErrorInvalidResource 3302);
+            // addResourceWithType: with the raw data is the reliable path.
+            if (data) {
+                PHAssetCreationRequest *req = [PHAssetCreationRequest creationRequestForAsset];
+                [req addResourceWithType:PHAssetResourceTypePhoto data:data options:nil];
+            } else {
+                [PHAssetChangeRequest creationRequestForAssetFromImage:image];
+            }
         } completionHandler:^(BOOL success, NSError *error) {
             dispatch_async(dispatch_get_main_queue(), ^{ [self showSaveResult:success error:error]; });
         }];
