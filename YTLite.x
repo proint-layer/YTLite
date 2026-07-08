@@ -1241,15 +1241,111 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 // experiment iosPostImageGalleryStart and does nothing when that experiment is off.
 // The current closed-source YTLite 5.2.1 solves this the same way: it ships its own
 // viewer (DVNImageViewController) instead of relying on the native path.
-@interface YTLImageViewer : UIViewController <UIScrollViewDelegate, UIGestureRecognizerDelegate>
-@property (nonatomic, strong) UIScrollView *scrollView;
+// One zoomable page in the gallery: a UIScrollView holding an aspect-fit UIImageView that
+// loads its URL (full-res =s0) with pinch + double-tap zoom. Reports zoom changes so the
+// container can disable paging/dismiss while zoomed.
+@interface YTLZoomView : UIScrollView <UIScrollViewDelegate>
 @property (nonatomic, strong) UIImageView *imageView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
+@property (nonatomic, strong) NSData *imageData;
+@property (nonatomic, strong) NSURL *url;
+@property (nonatomic, copy) void (^onZoomChanged)(void);
+- (instancetype)initWithFrame:(CGRect)frame url:(NSURL *)url;
+- (BOOL)isZoomedIn;
+@end
+
+@implementation YTLZoomView
+
+- (instancetype)initWithFrame:(CGRect)frame url:(NSURL *)url {
+    if ((self = [super initWithFrame:frame])) {
+        _url = url;
+        self.delegate = self;
+        self.minimumZoomScale = 1.0;
+        self.maximumZoomScale = 4.0;
+        self.showsHorizontalScrollIndicator = NO;
+        self.showsVerticalScrollIndicator = NO;
+        self.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+
+        _imageView = [[UIImageView alloc] initWithFrame:self.bounds];
+        _imageView.contentMode = UIViewContentModeScaleAspectFit;
+        _imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [self addSubview:_imageView];
+
+        _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+        _spinner.color = [UIColor whiteColor];
+        _spinner.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+        _spinner.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin | UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
+        [_spinner startAnimating];
+        [self addSubview:_spinner];
+
+        UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
+        doubleTap.numberOfTapsRequired = 2;
+        [self addGestureRecognizer:doubleTap];
+
+        [self load];
+    }
+    return self;
+}
+
+- (void)load {
+    __weak typeof(self) weakSelf = self;
+    [[[NSURLSession sharedSession] dataTaskWithURL:self.url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        UIImage *image = data ? [UIImage imageWithData:data] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self) return;
+            [self.spinner stopAnimating];
+            if (image) { self.imageData = data; self.imageView.image = image; }
+        });
+    }] resume];
+}
+
+- (BOOL)isZoomedIn { return self.zoomScale > self.minimumZoomScale + 0.01; }
+
+- (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView { return self.imageView; }
+
+- (void)scrollViewDidZoom:(UIScrollView *)scrollView {
+    CGSize b = scrollView.bounds.size, c = scrollView.contentSize;
+    CGFloat ox = c.width < b.width ? (b.width - c.width) / 2.0 : 0;
+    CGFloat oy = c.height < b.height ? (b.height - c.height) / 2.0 : 0;
+    self.imageView.center = CGPointMake(c.width / 2.0 + ox, c.height / 2.0 + oy);
+    if (self.onZoomChanged) self.onZoomChanged();
+}
+
+- (void)scrollViewDidEndZooming:(UIScrollView *)scrollView withView:(UIView *)view atScale:(CGFloat)scale {
+    if (self.onZoomChanged) self.onZoomChanged();
+}
+
+- (void)handleDoubleTap:(UITapGestureRecognizer *)g {
+    if ([self isZoomedIn]) {
+        [self setZoomScale:self.minimumZoomScale animated:YES];
+    } else {
+        CGPoint pt = [g locationInView:self.imageView];
+        CGFloat scale = 2.5;
+        CGSize size = self.bounds.size;
+        CGRect rect = CGRectMake(pt.x - (size.width / scale) / 2.0, pt.y - (size.height / scale) / 2.0, size.width / scale, size.height / scale);
+        [self zoomToRect:rect animated:YES];
+    }
+}
+
+@end
+
+// Self-contained fullscreen gallery. YouTube's native tap-to-fullscreen for community-post
+// images (didTapBackstageImageView: -> YTBackstageFullscreenImageViewController) is gated
+// behind the server hot-config experiment iosPostImageGalleryStart and does nothing when
+// off. The current closed-source YTLite 5.2.1 ships its own viewer for the same reason.
+// Horizontal paging browses multiple images in a post; each page zooms independently.
+@interface YTLImageViewer : UIViewController <UIScrollViewDelegate, UIGestureRecognizerDelegate>
+@property (nonatomic, strong) NSArray<NSURL *> *urls;
+@property (nonatomic, assign) NSInteger startIndex;
+@property (nonatomic, strong) UIScrollView *pager;
+@property (nonatomic, strong) NSMutableArray<YTLZoomView *> *pages;
 @property (nonatomic, strong) UIButton *closeButton;
 @property (nonatomic, strong) UIButton *saveButton;
 @property (nonatomic, strong) UIButton *shareButton;
-@property (nonatomic, strong) NSURL *sourceURL;
-@property (nonatomic, strong) NSData *imageData;
+@property (nonatomic, strong) UILabel *counterLabel;
+@property (nonatomic, assign) BOOL didInitialLayout;
++ (void)presentWithURLs:(NSArray<NSURL *> *)urls index:(NSInteger)index from:(UIViewController *)presenter;
 + (void)presentWithURL:(NSURL *)url from:(UIViewController *)presenter;
 @end
 
@@ -1257,6 +1353,11 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 
 + (void)presentWithURL:(NSURL *)url from:(UIViewController *)presenter {
     if (!url) return;
+    [self presentWithURLs:@[url] index:0 from:presenter];
+}
+
++ (void)presentWithURLs:(NSArray<NSURL *> *)urls index:(NSInteger)index from:(UIViewController *)presenter {
+    if (urls.count == 0) return;
     UIViewController *host = presenter;
     if (!host) {
         UIWindow *keyWindow = nil;
@@ -1268,16 +1369,22 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
     }
     if (!host) return;
     while (host.presentedViewController) host = host.presentedViewController;
-    // Guard against double-present (a single tap can be seen by more than one matching
-    // view's recognizer): if a viewer is already up, do nothing.
+    // Guard against double-present (a tap can be seen by more than one matching view).
     if ([host isKindOfClass:[YTLImageViewer class]]) return;
+
+    // Normalize every URL to full-res (=s0).
+    NSMutableArray<NSURL *> *full = [NSMutableArray arrayWithCapacity:urls.count];
+    for (NSURL *u in urls) {
+        NSURL *n = [NSURL URLWithString:ytMaxResURLString(u.absoluteString)] ?: u;
+        [full addObject:n];
+    }
     YTLImageViewer *vc = [YTLImageViewer new];
-    NSString *maxRes = ytMaxResURLString(url.absoluteString);
-    vc.sourceURL = [NSURL URLWithString:maxRes] ?: url;
+    vc.urls = full;
+    vc.startIndex = MAX(0, MIN((NSInteger)full.count - 1, index));
     vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
     vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
 #if defined(YTL_POST_DEBUG)
-    YTLDBG(@"presenting viewer for %@ from %@", vc.sourceURL.absoluteString, NSStringFromClass([host class]));
+    YTLDBG(@"presenting gallery: %lu image(s), index %ld, from %@", (unsigned long)full.count, (long)vc.startIndex, NSStringFromClass([host class]));
 #endif
     [host presentViewController:vc animated:YES completion:nil];
 }
@@ -1286,25 +1393,23 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor blackColor];
 
-    self.scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
-    self.scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.scrollView.delegate = self;
-    self.scrollView.minimumZoomScale = 1.0;
-    self.scrollView.maximumZoomScale = 4.0;
-    self.scrollView.showsHorizontalScrollIndicator = NO;
-    self.scrollView.showsVerticalScrollIndicator = NO;
-    self.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
-    [self.view addSubview:self.scrollView];
+    self.pager = [[UIScrollView alloc] initWithFrame:self.view.bounds];
+    self.pager.pagingEnabled = YES;
+    self.pager.showsHorizontalScrollIndicator = NO;
+    self.pager.showsVerticalScrollIndicator = NO;
+    self.pager.alwaysBounceVertical = NO;
+    self.pager.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    self.pager.delegate = self;
+    [self.view addSubview:self.pager];
 
-    self.imageView = [[UIImageView alloc] initWithFrame:self.scrollView.bounds];
-    self.imageView.contentMode = UIViewContentModeScaleAspectFit;
-    self.imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.scrollView addSubview:self.imageView];
-
-    self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
-    self.spinner.color = [UIColor whiteColor];
-    [self.spinner startAnimating];
-    [self.view addSubview:self.spinner];
+    self.pages = [NSMutableArray array];
+    __weak typeof(self) weakSelf = self;
+    for (NSURL *url in self.urls) {
+        YTLZoomView *page = [[YTLZoomView alloc] initWithFrame:CGRectZero url:url];
+        page.onZoomChanged = ^{ [weakSelf currentPageZoomChanged]; };
+        [self.pager addSubview:page];
+        [self.pages addObject:page];
+    }
 
     self.closeButton = [self chromeButtonWithSystemImage:@"xmark" action:@selector(closeTapped)];
     self.saveButton = [self chromeButtonWithSystemImage:@"square.and.arrow.down" action:@selector(saveTapped)];
@@ -1313,27 +1418,22 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
     [self.view addSubview:self.saveButton];
     [self.view addSubview:self.shareButton];
 
-    UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
-    doubleTap.numberOfTapsRequired = 2;
-    [self.view addGestureRecognizer:doubleTap];
+    self.counterLabel = [[UILabel alloc] init];
+    self.counterLabel.textColor = [UIColor whiteColor];
+    self.counterLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    self.counterLabel.textAlignment = NSTextAlignmentCenter;
+    self.counterLabel.hidden = (self.urls.count < 2);
+    [self.view addSubview:self.counterLabel];
 
-    UITapGestureRecognizer *singleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(closeTapped)];
-    singleTap.numberOfTapsRequired = 1;
-    [singleTap requireGestureRecognizerToFail:doubleTap];
-    [self.view addGestureRecognizer:singleTap];
-
-    // Swipe up/down to dismiss (interactive drag + fade), when not zoomed in.
+    // Swipe up/down to dismiss (when not zoomed and drag is mostly vertical).
     UIPanGestureRecognizer *dismissPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleDismissPan:)];
     dismissPan.delegate = self;
     [self.view addGestureRecognizer:dismissPan];
-
-    [self loadImage];
 }
 
 - (UIButton *)chromeButtonWithSystemImage:(NSString *)name action:(SEL)action {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    UIImage *img = [UIImage systemImageNamed:name];
-    [b setImage:img forState:UIControlStateNormal];
+    [b setImage:[UIImage systemImageNamed:name] forState:UIControlStateNormal];
     b.tintColor = [UIColor whiteColor];
     b.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
     b.layer.cornerRadius = 20.0;
@@ -1344,77 +1444,85 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    self.spinner.center = CGPointMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds));
+    CGFloat W = self.view.bounds.size.width;
+    CGFloat H = self.view.bounds.size.height;
+    self.pager.frame = self.view.bounds;
+    for (NSInteger i = 0; i < (NSInteger)self.pages.count; i++) {
+        self.pages[i].frame = CGRectMake(i * W, 0, W, H);
+    }
+    self.pager.contentSize = CGSizeMake(W * self.pages.count, H);
+    if (!self.didInitialLayout) {
+        self.didInitialLayout = YES;
+        self.pager.contentOffset = CGPointMake(self.startIndex * W, 0);
+        [self updateCounter];
+    }
     UIEdgeInsets safe = self.view.safeAreaInsets;
     CGFloat top = safe.top + 8;
-    CGFloat right = self.view.bounds.size.width - safe.right - 8 - 40;
+    CGFloat right = W - safe.right - 8 - 40;
     self.closeButton.frame = CGRectMake(safe.left + 8, top, 40, 40);
     self.shareButton.frame = CGRectMake(right, top, 40, 40);
     self.saveButton.frame = CGRectMake(right - 48, top, 40, 40);
+    self.counterLabel.frame = CGRectMake(W / 2.0 - 60, top, 120, 40);
 }
 
-- (void)loadImage {
-    NSURL *url = self.sourceURL;
-    NSURLSession *session = [NSURLSession sharedSession];
-    [[session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        UIImage *image = data ? [UIImage imageWithData:data] : nil;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self.spinner stopAnimating];
-            if (image) {
-                self.imageData = data;
-                self.imageView.image = image;
-            } else {
-                [self closeTapped];
-            }
-        });
-    }] resume];
+- (NSInteger)currentIndex {
+    CGFloat W = self.view.bounds.size.width;
+    if (W <= 0) return self.startIndex;
+    NSInteger i = (NSInteger)lround(self.pager.contentOffset.x / W);
+    return MAX(0, MIN((NSInteger)self.pages.count - 1, i));
 }
 
-- (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView { return self.imageView; }
-
-- (void)scrollViewDidZoom:(UIScrollView *)scrollView {
-    CGSize bounds = scrollView.bounds.size;
-    CGSize content = scrollView.contentSize;
-    CGFloat offsetX = content.width < bounds.width ? (bounds.width - content.width) / 2.0 : 0;
-    CGFloat offsetY = content.height < bounds.height ? (bounds.height - content.height) / 2.0 : 0;
-    self.imageView.center = CGPointMake(content.width / 2.0 + offsetX, content.height / 2.0 + offsetY);
+- (YTLZoomView *)currentPage {
+    NSInteger i = [self currentIndex];
+    return (i >= 0 && i < (NSInteger)self.pages.count) ? self.pages[i] : nil;
 }
 
-- (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
-    if (self.scrollView.zoomScale > self.scrollView.minimumZoomScale) {
-        [self.scrollView setZoomScale:self.scrollView.minimumZoomScale animated:YES];
-    } else {
-        CGPoint pt = [gesture locationInView:self.imageView];
-        CGFloat scale = 2.5;
-        CGSize size = self.scrollView.bounds.size;
-        CGRect rect = CGRectMake(pt.x - (size.width / scale) / 2.0, pt.y - (size.height / scale) / 2.0, size.width / scale, size.height / scale);
-        [self.scrollView zoomToRect:rect animated:YES];
+- (void)updateCounter {
+    if (self.urls.count < 2) return;
+    self.counterLabel.text = [NSString stringWithFormat:@"%ld / %lu", (long)[self currentIndex] + 1, (unsigned long)self.urls.count];
+}
+
+// Disable paging while a page is zoomed in so panning moves within the image.
+- (void)currentPageZoomChanged {
+    self.pager.scrollEnabled = ![[self currentPage] isZoomedIn];
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (scrollView == self.pager) [self updateCounter];
+}
+
+- (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
+    if (scrollView != self.pager) return;
+    // Reset zoom on pages that scrolled off-screen.
+    NSInteger cur = [self currentIndex];
+    for (NSInteger i = 0; i < (NSInteger)self.pages.count; i++) {
+        if (i != cur && [self.pages[i] isZoomedIn]) [self.pages[i] setZoomScale:self.pages[i].minimumZoomScale animated:NO];
     }
 }
 
 - (void)closeTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
 
-- (BOOL)isZoomedIn {
-    return self.scrollView.zoomScale > self.scrollView.minimumZoomScale + 0.01;
-}
-
-// Only start the dismiss-pan on a mostly-vertical drag while not zoomed; otherwise let
-// the scroll view handle panning (zoomed scrolling).
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g {
     if ([g isKindOfClass:[UIPanGestureRecognizer class]] && g.view == self.view) {
-        if ([self isZoomedIn]) return NO;
+        if ([[self currentPage] isZoomedIn]) return NO;
         CGPoint v = [(UIPanGestureRecognizer *)g velocityInView:self.view];
         return fabs(v.y) > fabs(v.x);
     }
     return YES;
 }
 
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return YES;
+}
+
 - (void)handleDismissPan:(UIPanGestureRecognizer *)g {
-    if ([self isZoomedIn]) return;
     CGPoint t = [g translationInView:self.view];
     switch (g.state) {
+        case UIGestureRecognizerStateBegan:
+            self.pager.scrollEnabled = NO; // don't page while dragging to dismiss
+            break;
         case UIGestureRecognizerStateChanged: {
-            self.scrollView.transform = CGAffineTransformMakeTranslation(0, t.y);
+            self.pager.transform = CGAffineTransformMakeTranslation(0, t.y);
             CGFloat progress = MIN(1.0, fabs(t.y) / 320.0);
             self.view.backgroundColor = [UIColor colorWithWhite:0.0 alpha:1.0 - progress * 0.75];
             break;
@@ -1423,18 +1531,19 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
         case UIGestureRecognizerStateCancelled: {
             CGPoint vel = [g velocityInView:self.view];
             if (fabs(t.y) > 120.0 || fabs(vel.y) > 800.0) {
-                // Fling the image off in the drag direction, then dismiss.
                 CGFloat dir = (t.y + vel.y) >= 0 ? 1.0 : -1.0;
                 [UIView animateWithDuration:0.2 animations:^{
-                    self.scrollView.transform = CGAffineTransformMakeTranslation(0, dir * self.view.bounds.size.height);
+                    self.pager.transform = CGAffineTransformMakeTranslation(0, dir * self.view.bounds.size.height);
                     self.view.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.0];
                 } completion:^(BOOL finished) {
                     [self dismissViewControllerAnimated:NO completion:nil];
                 }];
             } else {
                 [UIView animateWithDuration:0.25 animations:^{
-                    self.scrollView.transform = CGAffineTransformIdentity;
+                    self.pager.transform = CGAffineTransformIdentity;
                     self.view.backgroundColor = [UIColor blackColor];
+                } completion:^(BOOL finished) {
+                    self.pager.scrollEnabled = YES;
                 }];
             }
             break;
@@ -1444,15 +1553,15 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 }
 
 - (void)saveTapped {
-    UIImage *image = self.imageView.image;
-    if (!image && !self.imageData) return;
-    NSData *data = self.imageData;
+    YTLZoomView *page = [self currentPage];
+    UIImage *image = page.imageView.image;
+    NSData *data = page.imageData;
+    if (!image && !data) return;
     ytlEnsurePhotosAuth(^(BOOL granted) {
         if (!granted) { [self showSaveResult:NO error:[NSError errorWithDomain:@"YTLite" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Photos access denied"}]]; return; }
         [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-            // Save the original downloaded bytes as a resource. creationRequestForAssetFromImage:
-            // re-encodes the UIImage and fails validation here (PHPhotosErrorInvalidResource 3302);
-            // addResourceWithType: with the raw data is the reliable path.
+            // addResourceWithType: with the original bytes avoids PHPhotosErrorInvalidResource
+            // (3302) that creationRequestForAssetFromImage: hits by re-encoding.
             if (data) {
                 PHAssetCreationRequest *req = [PHAssetCreationRequest creationRequestForAsset];
                 [req addResourceWithType:PHAssetResourceTypePhoto data:data options:nil];
@@ -1476,7 +1585,7 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 }
 
 - (void)shareTapped {
-    UIImage *image = self.imageView.image;
+    UIImage *image = [self currentPage].imageView.image;
     if (!image) return;
     UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[image] applicationActivities:nil];
     av.popoverPresentationController.sourceView = self.shareButton;
@@ -1485,6 +1594,43 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 }
 
 @end
+
+// Collects, in traversal order, the large post-photo URLs in a node subtree, deduped by
+// their =s0-normalized form. Best-effort: only realized image nodes are reachable, so a
+// multi-image post whose off-screen images aren't laid out yet may yield a subset.
+static void ytlCollectPostImages(ASDisplayNode *node, int depth, NSMutableArray<NSURL *> *out) {
+    if (!node || depth > 16 || out.count >= 30) return;
+    NSURL *own = nodeImageURL(node);
+    if (own && ytlIsPostPhotoURL(own)) {
+        CGSize sz = node.frame.size;
+        if (sz.width >= kYTLMinImageEdge && sz.height >= kYTLMinImageEdge) {
+            NSString *norm = ytMaxResURLString(own.absoluteString);
+            BOOL dup = NO;
+            for (NSURL *u in out) { if ([ytMaxResURLString(u.absoluteString) isEqualToString:norm]) { dup = YES; break; } }
+            if (!dup) [out addObject:own];
+        }
+    }
+    for (ASDisplayNode *child in node.yogaChildren) ytlCollectPostImages(child, depth + 1, out);
+    if ([node respondsToSelector:@selector(subnodes)]) {
+        for (ASDisplayNode *child in [node valueForKey:@"subnodes"]) ytlCollectPostImages(child, depth + 1, out);
+    }
+}
+
+// Opens the gallery for a post: gathers all its images (so the viewer can page between
+// them) and starts on the tapped one. Falls back to just the tapped image if collection
+// can't locate it in the subtree.
+static void ytlPresentGallery(ASDisplayNode *root, NSURL *tapped, UIViewController *host) {
+    if (!tapped) return;
+    NSMutableArray<NSURL *> *all = [NSMutableArray array];
+    ytlCollectPostImages(root, 0, all);
+    NSString *tappedNorm = ytMaxResURLString(tapped.absoluteString);
+    NSInteger idx = NSNotFound;
+    for (NSInteger i = 0; i < (NSInteger)all.count; i++) {
+        if ([ytMaxResURLString(all[i].absoluteString) isEqualToString:tappedNorm]) { idx = i; break; }
+    }
+    if (idx == NSNotFound) { all = [NSMutableArray arrayWithObject:tapped]; idx = 0; }
+    [YTLImageViewer presentWithURLs:all index:idx from:host];
+}
 
 // Community-post container identifiers vary by YouTube build. Match a broadened set
 // so the feature survives identifier renames (original_post -> post_base_wrapper, etc.).
@@ -1573,7 +1719,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
            hv ? NSStringFromClass([hv class]) : @"nil", url.absoluteString ?: @"(none)");
 #endif
     if (!url) return;
-    [YTLImageViewer presentWithURL:url from:self.keepalive_node.closestViewController];
+    ytlPresentGallery((ASDisplayNode *)self.keepalive_node, url, self.keepalive_node.closestViewController);
 }
 
 %new
@@ -1638,7 +1784,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
 
         if (URL) {
             [sheetController addAction:[%c(YTActionSheetAction) actionWithTitle:@"Open Image" iconImage:YTImageNamed(@"yt_outline_youtube_search_24pt") style:0 handler:^ {
-                [YTLImageViewer presentWithURL:URL from:containerNode.closestViewController];
+                ytlPresentGallery((ASDisplayNode *)containerNode, URL, containerNode.closestViewController);
             }]];
 
             [sheetController addAction:[%c(YTActionSheetAction) actionWithTitle:LOC(@"SaveCurrentImage") iconImage:YTImageNamed(@"yt_outline_image_24pt") style:0 handler:^ {
