@@ -1129,18 +1129,24 @@ static void ytlConfigureLongPress(UILongPressGestureRecognizer *lp) {
 // contains `p` (p expressed in `node`'s own coordinate space). Node frames are
 // in the supernode's space, so we translate the point as we descend. Used to
 // decide whether a tap on the post container landed on an image, and which one.
+static NSURL *nodeImageURL(ASDisplayNode *node) {
+    if ([node respondsToSelector:@selector(URL)]) {
+        id u = [(id)node URL];
+        if ([u isKindOfClass:[NSURL class]]) return (NSURL *)u;
+    }
+    return nil;
+}
+
 static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
-    if (!node || depth > 12) return nil;
+    if (!node || depth > 14) return nil;
     for (ASDisplayNode *child in node.yogaChildren) {
         CGRect f = child.frame;
         if (CGRectIsEmpty(f) || !CGRectContainsPoint(f, p)) continue;
         CGPoint cp = CGPointMake(p.x - f.origin.x, p.y - f.origin.y);
-        if ([child isKindOfClass:NSClassFromString(@"ASNetworkImageNode")]) {
-            NSURL *u = ((ASNetworkImageNode *)child).URL;
-            if (u) return u;
-        }
         NSURL *deeper = imageURLAtPoint(child, cp, depth + 1);
         if (deeper) return deeper;
+        NSURL *own = nodeImageURL(child);
+        if (own) return own;
     }
     return nil;
 }
@@ -1182,6 +1188,9 @@ static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
     vc.sourceURL = [NSURL URLWithString:maxRes] ?: url;
     vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
     vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+#if defined(YTL_POST_DEBUG)
+    NSLog(@"[YTLITE] presenting viewer for %@ from %@", vc.sourceURL.absoluteString, host);
+#endif
     [host presentViewController:vc animated:YES completion:nil];
 }
 
@@ -1317,12 +1326,35 @@ static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
 
 @end
 
+// Community-post container identifiers vary by YouTube build. Match a broadened set
+// so the feature survives identifier renames (original_post -> post_base_wrapper, etc.).
+static BOOL ytlDescIsPost(NSString *desc) {
+    if (!desc) return NO;
+    return [desc containsString:@"id.ui.backstage.original_post"] ||
+           [desc containsString:@"post_base_wrapper"] ||
+           [desc containsString:@"sharedpost"] ||
+           [desc containsString:@"backstage"];
+}
+
 %hook _ASDisplayView
 - (void)setKeepalive_node:(id)arg1 {
     %orig;
 
+    NSString *desc = [self description];
+
+#if defined(YTL_POST_DEBUG)
+    // Diagnostic: surface the real runtime identifiers of post/comment/image views so
+    // we can confirm what a community post actually looks like on this build.
+    if (ytlBool(@"postManager") &&
+        ([desc rangeOfString:@"post" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+         [desc rangeOfString:@"backstage" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+         [desc rangeOfString:@"image" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+        NSString *trimmed = desc.length > 700 ? [desc substringToIndex:700] : desc;
+        NSLog(@"[YTLITE] keepalive view: %@", trimmed);
+    }
+#endif
+
     NSArray *gesturesInfo = @[
-        @{@"selector": @"postManager:", @"text": @"id.ui.backstage.original_post", @"key": @(ytlBool(@"postManager"))},
         @{@"selector": @"savePFP:", @"text": @"ELMImageNode-View", @"key": @(ytlBool(@"saveProfilePhoto"))},
         @{@"selector": @"commentManager:", @"text": @"id.ui.comment_cell", @"key": @(ytlBool(@"commentManager"))}
     ];
@@ -1330,7 +1362,7 @@ static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
     for (NSDictionary *gestureInfo in gesturesInfo) {
         SEL selector = NSSelectorFromString(gestureInfo[@"selector"]);
 
-        if ([gestureInfo[@"key"] boolValue] && [[self description] containsString:gestureInfo[@"text"]]) {
+        if ([gestureInfo[@"key"] boolValue] && [desc containsString:gestureInfo[@"text"]]) {
             UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:selector];
             ytlConfigureLongPress(longPress);
             [self addGestureRecognizer:longPress];
@@ -1338,10 +1370,16 @@ static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
         }
     }
 
-    // Tap-to-open the fullscreen viewer for community-post images. Coordinated so it
-    // never suppresses native taps (post detail, buttons); the handler only acts when
-    // the tap actually lands on an image node, otherwise it is a no-op.
-    if (ytlBool(@"postManager") && [[self description] containsString:@"id.ui.backstage.original_post"]) {
+    // Community post: attach BOTH the long-press action menu and the tap-to-open viewer.
+    // Coordinated so they never suppress native taps; handlers no-op off-image.
+    if (ytlBool(@"postManager") && ytlDescIsPost(desc)) {
+#if defined(YTL_POST_DEBUG)
+        NSLog(@"[YTLITE] attaching post gestures to: %@", desc.length > 200 ? [desc substringToIndex:200] : desc);
+#endif
+        UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(postManager:)];
+        ytlConfigureLongPress(longPress);
+        [self addGestureRecognizer:longPress];
+
         UITapGestureRecognizer *imageTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(postImageTap:)];
         imageTap.cancelsTouchesInView = NO;
         imageTap.delaysTouchesBegan = NO;
@@ -1358,6 +1396,9 @@ static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
     if (!containerNode) return;
     CGPoint point = [sender locationInView:self];
     NSURL *url = imageURLAtPoint(containerNode, point, 0);
+#if defined(YTL_POST_DEBUG)
+    NSLog(@"[YTLITE] postImageTap at {%.0f,%.0f} -> url=%@", point.x, point.y, url.absoluteString ?: @"(none)");
+#endif
     if (!url) return;
     [YTLImageViewer presentWithURL:url from:containerNode.closestViewController];
 }
