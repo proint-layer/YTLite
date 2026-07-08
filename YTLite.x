@@ -1643,87 +1643,75 @@ static void ytlAddPhotoURLsFromString(NSString *s, NSMutableArray<NSURL *> *out)
     }
 }
 
-// Collects, in traversal order, the large post-photo URLs among realized image nodes in a
-// subtree (deduped). Only a fallback — off-screen carousel images aren't reachable here.
-static void ytlCollectRealizedPostImages(ASDisplayNode *node, int depth, NSMutableArray<NSURL *> *out) {
-    if (!node || depth > 16 || out.count >= 30) return;
-    NSURL *own = nodeImageURL(node);
-    if (own && ytlIsPostPhotoURL(own)) {
-        CGSize sz = node.frame.size;
-        if (sz.width >= kYTLMinImageEdge && sz.height >= kYTLMinImageEdge) {
-            NSString *norm = ytMaxResURLString(own.absoluteString);
-            BOOL dup = NO;
-            for (NSURL *u in out) { if ([ytMaxResURLString(u.absoluteString) isEqualToString:norm]) { dup = YES; break; } }
-            if (!dup) [out addObject:own];
-        }
-    }
-    for (ASDisplayNode *child in node.yogaChildren) ytlCollectRealizedPostImages(child, depth + 1, out);
-    if ([node respondsToSelector:@selector(subnodes)]) {
-        for (ASDisplayNode *child in [node valueForKey:@"subnodes"]) ytlCollectRealizedPostImages(child, depth + 1, out);
-    }
-}
 
 // Opens the gallery for a post: gathers ALL its images so the viewer can page between them
 // (primary source is the element/renderer description, which lists every image even ones
 // not yet realized; falls back to the realized node walk), starting on the tapped one.
-static void ytlPresentGallery(ASDisplayNode *root, NSURL *tapped, UIViewController *host) {
-    if (!tapped) return;
-    NSMutableArray<NSURL *> *all = [NSMutableArray array];
-
-    // Source 1: the post's model text. ELMElement.protoText dumps the full backstage
-    // renderer protobuf, which enumerates every attachment image even ones not yet
-    // realized in the lazily-loaded carousel.
-    NSString *proto = nil;
+// Returns the protoText of a node's ELMElement, or nil.
+static NSString *ytlNodeProtoText(id node) {
     @try {
-        id element = [root respondsToSelector:@selector(valueForKey:)] ? [root valueForKey:@"element"] : nil;
-        if ([element respondsToSelector:@selector(protoText)]) proto = [element valueForKey:@"protoText"];
-        if (![proto isKindOfClass:[NSString class]]) proto = nil;
-        if (proto) ytlAddPhotoURLsFromString(proto, all);
+        id element = [node respondsToSelector:@selector(valueForKey:)] ? [node valueForKey:@"element"] : nil;
+        if ([element respondsToSelector:@selector(protoText)]) {
+            id pt = [element valueForKey:@"protoText"];
+            if ([pt isKindOfClass:[NSString class]]) return pt;
+        }
     } @catch (__unused NSException *e) {}
-    NSUInteger fromElement = all.count;
-    if (all.count < 2) {
-        @try { ytlAddPhotoURLsFromString([root description], all); } @catch (__unused NSException *e) {}
-    }
-    NSUInteger fromDesc = all.count;
+    return nil;
+}
+
+// Opens the gallery for the image tapped at `point` in `rootView`. The post's images live
+// in a lazily-loaded carousel not under the gesture's container, so we hit-test to the
+// tapped view then climb its ancestors, reading each node's ELMElement.protoText (the full
+// renderer protobuf, which lists every attachment image); the ancestor whose protoText
+// yields the most images is the attachment container. Falls back to the single tapped URL.
+static void ytlPresentGalleryForView(UIView *rootView, CGPoint point, NSURL *tapped, UIViewController *host) {
+    if (!tapped) return;
+    NSMutableArray<NSURL *> *best = [NSMutableArray array];
 #if defined(YTL_POST_DEBUG)
-    {
-        NSString *p = proto ?: @"";
-        NSUInteger g = 0, f = 0, i = 0;
-        while (i < p.length) {
-            NSRange r = [p rangeOfString:@"ggpht.com" options:0 range:NSMakeRange(i, p.length - i)];
-            if (r.location == NSNotFound) break; g++; i = r.location + r.length;
-        }
-        i = 0;
-        while (i < p.length) {
-            NSRange r = [p rangeOfString:@"fcrop64" options:0 range:NSMakeRange(i, p.length - i)];
-            if (r.location == NSNotFound) break; f++; i = r.location + r.length;
-        }
-        YTLDBG(@"protoText len=%lu ggpht=%lu fcrop64=%lu", (unsigned long)p.length, (unsigned long)g, (unsigned long)f);
-    }
+    NSString *sampleProto = nil; NSUInteger sampleGgpht = 0;
 #endif
-
-    // Source 2 (fallback/supplement): realized image nodes.
-    NSMutableArray<NSURL *> *walk = [NSMutableArray array];
-    ytlCollectRealizedPostImages(root, 0, walk);
-    for (NSURL *u in walk) {
-        NSString *norm = ytMaxResURLString(u.absoluteString);
-        BOOL dup = NO;
-        for (NSURL *e in all) { if ([ytMaxResURLString(e.absoluteString) isEqualToString:norm]) { dup = YES; break; } }
-        if (!dup) [all addObject:[NSURL URLWithString:norm] ?: u];
+    UIView *v = [rootView hitTest:point withEvent:nil];
+    for (int i = 0; v && i < 14; i++) {
+        if ([v respondsToSelector:@selector(keepalive_node)]) {
+            NSString *proto = ytlNodeProtoText([(id)v keepalive_node]);
+            if (proto.length) {
+                NSMutableArray<NSURL *> *found = [NSMutableArray array];
+                ytlAddPhotoURLsFromString(proto, found);
+                if (found.count > best.count) best = found;
+#if defined(YTL_POST_DEBUG)
+                NSUInteger g = 0, idx = 0;
+                while (idx < proto.length) {
+                    NSRange r = [proto rangeOfString:@"ggpht" options:0 range:NSMakeRange(idx, proto.length - idx)];
+                    if (r.location == NSNotFound) break; g++; idx = r.location + r.length;
+                }
+                if (g > sampleGgpht) { sampleGgpht = g; sampleProto = proto; }
+#endif
+            }
+        }
+        if (best.count >= 2) break;
+        v = v.superview;
     }
 
+    NSMutableArray<NSURL *> *all = [NSMutableArray arrayWithArray:best];
     NSString *tappedNorm = ytMaxResURLString(tapped.absoluteString);
     NSInteger idx = NSNotFound;
     for (NSInteger i = 0; i < (NSInteger)all.count; i++) {
         if ([ytMaxResURLString(all[i].absoluteString) isEqualToString:tappedNorm]) { idx = i; break; }
     }
     if (idx == NSNotFound) {
-        // Ensure the tapped image is present and selected.
         [all insertObject:([NSURL URLWithString:tappedNorm] ?: tapped) atIndex:0];
         idx = 0;
     }
 #if defined(YTL_POST_DEBUG)
-    YTLDBG(@"gallery sources: element=%lu desc=%lu walk=%lu total=%lu", (unsigned long)fromElement, (unsigned long)fromDesc, (unsigned long)walk.count, (unsigned long)all.count);
+    YTLDBG(@"gallery: best=%lu total=%lu sampleGgpht=%lu sampleLen=%lu", (unsigned long)best.count, (unsigned long)all.count, (unsigned long)sampleGgpht, (unsigned long)sampleProto.length);
+    if (sampleProto.length) {
+        NSRange gr = [sampleProto rangeOfString:@"ggpht"];
+        if (gr.location != NSNotFound) {
+            NSInteger start = MAX(0, (NSInteger)gr.location - 80);
+            NSInteger len = MIN(300, (NSInteger)sampleProto.length - start);
+            YTLDBG(@"proto sample: %@", [sampleProto substringWithRange:NSMakeRange(start, len)]);
+        }
+    }
 #endif
     [YTLImageViewer presentWithURLs:all index:idx from:host];
 }
@@ -1815,7 +1803,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
            hv ? NSStringFromClass([hv class]) : @"nil", url.absoluteString ?: @"(none)");
 #endif
     if (!url) return;
-    ytlPresentGallery((ASDisplayNode *)self.keepalive_node, url, self.keepalive_node.closestViewController);
+    ytlPresentGalleryForView(self, point, url, self.keepalive_node.closestViewController);
 }
 
 %new
@@ -1879,8 +1867,9 @@ static BOOL ytlDescIsPost(NSString *desc) {
         }]];
 
         if (URL) {
+            CGPoint pressPoint = [sender locationInView:self];
             [sheetController addAction:[%c(YTActionSheetAction) actionWithTitle:@"Open Image" iconImage:YTImageNamed(@"yt_outline_youtube_search_24pt") style:0 handler:^ {
-                ytlPresentGallery((ASDisplayNode *)containerNode, URL, containerNode.closestViewController);
+                ytlPresentGalleryForView(self, pressPoint, URL, containerNode.closestViewController);
             }]];
 
             [sheetController addAction:[%c(YTActionSheetAction) actionWithTitle:LOC(@"SaveCurrentImage") iconImage:YTImageNamed(@"yt_outline_image_24pt") style:0 handler:^ {
