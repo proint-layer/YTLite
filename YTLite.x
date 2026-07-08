@@ -985,6 +985,34 @@ static NSURL *findImageURLInNode(ASDisplayNode *node, int depth) {
     return nil;
 }
 
+// Requests Photos read-write authorization (the app's Info.plist has
+// NSPhotoLibraryUsageDescription but NOT NSPhotoLibraryAddUsageDescription, so we must
+// use the read-write level and must not use UIImageWriteToSavedPhotosAlbum). Calls
+// granted(YES) on the main queue once access is available.
+static void ytlEnsurePhotosAuth(void (^done)(BOOL granted)) {
+    if (@available(iOS 14.0, *)) {
+        PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelReadWrite];
+        if (status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited) {
+            dispatch_async(dispatch_get_main_queue(), ^{ done(YES); });
+        } else {
+            [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite handler:^(PHAuthorizationStatus s) {
+                BOOL ok = (s == PHAuthorizationStatusAuthorized || s == PHAuthorizationStatusLimited);
+                dispatch_async(dispatch_get_main_queue(), ^{ done(ok); });
+            }];
+        }
+    } else {
+        PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
+        if (status == PHAuthorizationStatusAuthorized) {
+            dispatch_async(dispatch_get_main_queue(), ^{ done(YES); });
+        } else {
+            [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus s) {
+                BOOL ok = (s == PHAuthorizationStatusAuthorized);
+                dispatch_async(dispatch_get_main_queue(), ^{ done(ok); });
+            }];
+        }
+    }
+}
+
 static void downloadImageFromURL(UIResponder *responder, NSURL *URL, BOOL download) {
     NSString *URLString = URL.absoluteString;
 
@@ -1007,12 +1035,18 @@ static void downloadImageFromURL(UIResponder *responder, NSURL *URL, BOOL downlo
     [[session dataTaskWithURL:downloadURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (data) {
             if (download) {
-                [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-                    PHAssetCreationRequest *request = [PHAssetCreationRequest creationRequestForAsset];
-                    [request addResourceWithType:PHAssetResourceTypePhoto data:data options:nil];
-                } completionHandler:^(BOOL success, NSError *error) {
-                    [[%c(YTToastResponderEvent) eventWithMessage:success ? LOC(@"Saved") : [NSString stringWithFormat:LOC(@"%@: %@"), LOC(@"Error"), error.localizedDescription] firstResponder:responder] send];
-                }];
+                ytlEnsurePhotosAuth(^(BOOL granted) {
+                    if (!granted) {
+                        [[%c(YTToastResponderEvent) eventWithMessage:[NSString stringWithFormat:LOC(@"%@: %@"), LOC(@"Error"), @"Photos access denied"] firstResponder:responder] send];
+                        return;
+                    }
+                    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+                        PHAssetCreationRequest *request = [PHAssetCreationRequest creationRequestForAsset];
+                        [request addResourceWithType:PHAssetResourceTypePhoto data:data options:nil];
+                    } completionHandler:^(BOOL success, NSError *error) {
+                        [[%c(YTToastResponderEvent) eventWithMessage:success ? LOC(@"Saved") : [NSString stringWithFormat:LOC(@"%@: %@"), LOC(@"Error"), error.localizedDescription] firstResponder:responder] send];
+                    }];
+                });
             } else {
                 [UIPasteboard generalPasteboard].image = [UIImage imageWithData:data];
                 [[%c(YTToastResponderEvent) eventWithMessage:LOC(@"Copied") firstResponder:responder] send];
@@ -1198,7 +1232,6 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 + (void)presentWithURL:(NSURL *)url from:(UIViewController *)presenter {
     if (!url) return;
     UIViewController *host = presenter;
-    while (host.presentedViewController) host = host.presentedViewController;
     if (!host) {
         UIWindow *keyWindow = nil;
         for (UIWindow *w in UIApplication.sharedApplication.windows) {
@@ -1208,6 +1241,10 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
         host = keyWindow.rootViewController;
     }
     if (!host) return;
+    while (host.presentedViewController) host = host.presentedViewController;
+    // Guard against double-present (a single tap can be seen by more than one matching
+    // view's recognizer): if a viewer is already up, do nothing.
+    if ([host isKindOfClass:[YTLImageViewer class]]) return;
     YTLImageViewer *vc = [YTLImageViewer new];
     NSString *maxRes = ytMaxResURLString(url.absoluteString);
     vc.sourceURL = [NSURL URLWithString:maxRes] ?: url;
@@ -1328,14 +1365,21 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 - (void)saveTapped {
     UIImage *image = self.imageView.image;
     if (!image) return;
-    // UIImageWriteToSavedPhotosAlbum (same path savePFP uses) handles the add-only
-    // authorization prompt itself and avoids the PHPhotosError seen with a bare
-    // PHPhotoLibrary performChanges when access is add-only / not-yet-granted.
-    UIImageWriteToSavedPhotosAlbum(image, self, @selector(image:didFinishSavingWithError:contextInfo:), NULL);
+    ytlEnsurePhotosAuth(^(BOOL granted) {
+        if (!granted) { [self showSaveResult:NO error:[NSError errorWithDomain:@"YTLite" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Photos access denied"}]]; return; }
+        [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+            [PHAssetChangeRequest creationRequestForAssetFromImage:image];
+        } completionHandler:^(BOOL success, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{ [self showSaveResult:success error:error]; });
+        }];
+    });
 }
 
-- (void)image:(UIImage *)image didFinishSavingWithError:(NSError *)error contextInfo:(void *)contextInfo {
-    NSString *msg = error ? [NSString stringWithFormat:LOC(@"%@: %@"), LOC(@"Error"), error.localizedDescription] : LOC(@"Saved");
+- (void)showSaveResult:(BOOL)success error:(NSError *)error {
+#if defined(YTL_POST_DEBUG)
+    NSLog(@"[YTLITE] viewer save success=%d error=%s", success, error ? error.localizedDescription.UTF8String : "(none)");
+#endif
+    NSString *msg = success ? LOC(@"Saved") : [NSString stringWithFormat:LOC(@"%@: %@"), LOC(@"Error"), error.localizedDescription];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil message:msg preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
@@ -1399,22 +1443,32 @@ static BOOL ytlDescIsPost(NSString *desc) {
     // Community post: attach BOTH the long-press action menu and the tap-to-open viewer.
     // Coordinated so they never suppress native taps; handlers no-op off-image.
     if (ytlBool(@"postManager") && ytlDescIsPost(desc)) {
+        // setKeepalive_node: is called repeatedly on reused cells; only attach once per
+        // view or the recognizers stack and each tap fires (and presents) N times.
+        BOOL already = NO;
+        for (UIGestureRecognizer *gr in self.gestureRecognizers) {
+            if ([gr.name isEqualToString:@"YTLPost"]) { already = YES; break; }
+        }
+        if (!already) {
 #if defined(YTL_POST_DEBUG)
-        NSLog(@"[YTLITE] attaching post gestures to: %s", (desc.length > 200 ? [desc substringToIndex:200] : desc).UTF8String);
+            NSLog(@"[YTLITE] attaching post gestures to: %s", (desc.length > 200 ? [desc substringToIndex:200] : desc).UTF8String);
 #endif
-        UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(postManager:)];
-        ytlConfigureLongPress(longPress);
-        [self addGestureRecognizer:longPress];
+            UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(postManager:)];
+            ytlConfigureLongPress(longPress);
+            longPress.name = @"YTLPost";
+            [self addGestureRecognizer:longPress];
 
-        UITapGestureRecognizer *imageTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(postImageTap:)];
-        imageTap.cancelsTouchesInView = NO;
-        imageTap.delaysTouchesBegan = NO;
-        imageTap.delaysTouchesEnded = NO;
-        imageTap.delegate = [YTLGestureCoordinator shared];
-        // Don't let a long-press also count as a tap — the tap only fires if the
-        // long-press fails (i.e. a genuine quick tap).
-        [imageTap requireGestureRecognizerToFail:longPress];
-        [self addGestureRecognizer:imageTap];
+            UITapGestureRecognizer *imageTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(postImageTap:)];
+            imageTap.cancelsTouchesInView = NO;
+            imageTap.delaysTouchesBegan = NO;
+            imageTap.delaysTouchesEnded = NO;
+            imageTap.delegate = [YTLGestureCoordinator shared];
+            imageTap.name = @"YTLPost";
+            // Don't let a long-press also count as a tap — the tap only fires if the
+            // long-press fails (i.e. a genuine quick tap).
+            [imageTap requireGestureRecognizerToFail:longPress];
+            [self addGestureRecognizer:imageTap];
+        }
     }
 }
 
