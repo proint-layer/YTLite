@@ -956,17 +956,31 @@ static NSString *ytMaxResURLString(NSString *urlString) {
     return urlString;
 }
 
-// Walks an ASDisplayNode tree depth-first to find the first loaded ASNetworkImageNode URL.
-static NSURL *findImageURLInNode(ASDisplayNode *node, int depth) {
-    if (!node || depth > 8) return nil;
-    Class imgClass = NSClassFromString(@"ASNetworkImageNode");
-    if (imgClass && [node isKindOfClass:imgClass]) {
-        NSURL *url = ((ASNetworkImageNode *)node).URL;
-        if (url) return url;
+// Returns a node's image URL if it exposes one (ASNetworkImageNode and subclasses,
+// or any node responding to -URL). Skips avatar-sized thumbnails is left to callers.
+static NSURL *nodeImageURL(ASDisplayNode *node) {
+    if ([node respondsToSelector:@selector(URL)]) {
+        id u = [(id)node URL];
+        if ([u isKindOfClass:[NSURL class]]) return (NSURL *)u;
     }
+    return nil;
+}
+
+// Walks a node tree depth-first (both yogaChildren and subnodes) for the first image URL.
+static NSURL *findImageURLInNode(ASDisplayNode *node, int depth) {
+    if (!node || depth > 12) return nil;
+    NSURL *own = nodeImageURL(node);
+    if (own) return own;
     for (ASDisplayNode *child in node.yogaChildren) {
         NSURL *url = findImageURLInNode(child, depth + 1);
         if (url) return url;
+    }
+    if ([node respondsToSelector:@selector(subnodes)]) {
+        NSArray *subs = [node valueForKey:@"subnodes"];
+        for (ASDisplayNode *child in subs) {
+            NSURL *url = findImageURLInNode(child, depth + 1);
+            if (url) return url;
+        }
     }
     return nil;
 }
@@ -1125,18 +1139,9 @@ static void ytlConfigureLongPress(UILongPressGestureRecognizer *lp) {
     lp.delegate = [YTLGestureCoordinator shared];
 }
 
-// Depth-first search of the node tree for an ASNetworkImageNode whose frame
-// contains `p` (p expressed in `node`'s own coordinate space). Node frames are
-// in the supernode's space, so we translate the point as we descend. Used to
-// decide whether a tap on the post container landed on an image, and which one.
-static NSURL *nodeImageURL(ASDisplayNode *node) {
-    if ([node respondsToSelector:@selector(URL)]) {
-        id u = [(id)node URL];
-        if ([u isKindOfClass:[NSURL class]]) return (NSURL *)u;
-    }
-    return nil;
-}
-
+// Depth-first search of the node tree for an image node whose frame contains `p`
+// (p expressed in `node`'s own coordinate space). Node frames are in the supernode's
+// space, so we translate the point as we descend.
 static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
     if (!node || depth > 14) return nil;
     for (ASDisplayNode *child in node.yogaChildren) {
@@ -1149,6 +1154,26 @@ static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
         if (own) return own;
     }
     return nil;
+}
+
+// Finds the image URL under `point` (in rootView's coords). Primary strategy is UIView
+// hit-testing — robust to nested collection cells and scroll offsets (e.g. the
+// "Posts from …'s Community" carousel, where the image is not in the tapped container's
+// yogaChildren) — climbing from the hit view to the nearest node exposing an image URL.
+// Falls back to the frame-based node walk from the root view's own node.
+static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
+    UIView *v = [rootView hitTest:point withEvent:nil];
+    for (int i = 0; v && i < 10; i++) {
+        if ([v respondsToSelector:@selector(keepalive_node)]) {
+            NSURL *u = findImageURLInNode((ASDisplayNode *)[(id)v keepalive_node], 0);
+            if (u) return u;
+        }
+        v = v.superview;
+    }
+    ASDisplayNode *node = nil;
+    if ([rootView respondsToSelector:@selector(keepalive_node)])
+        node = (ASDisplayNode *)[(id)rootView keepalive_node];
+    return imageURLAtPoint(node, point, 0) ?: findImageURLInNode(node, 0);
 }
 
 // Self-contained fullscreen zoomable image viewer. YouTube's native
@@ -1189,7 +1214,7 @@ static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
     vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
     vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
 #if defined(YTL_POST_DEBUG)
-    NSLog(@"[YTLITE] presenting viewer for %@ from %@", vc.sourceURL.absoluteString, host);
+    NSLog(@"[YTLITE] presenting viewer for %s from %s", vc.sourceURL.absoluteString.UTF8String, NSStringFromClass([host class]).UTF8String);
 #endif
     [host presentViewController:vc animated:YES completion:nil];
 }
@@ -1303,16 +1328,17 @@ static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
 - (void)saveTapped {
     UIImage *image = self.imageView.image;
     if (!image) return;
-    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-        [PHAssetChangeRequest creationRequestForAssetFromImage:image];
-    } completionHandler:^(BOOL success, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *msg = success ? LOC(@"Saved") : [NSString stringWithFormat:LOC(@"%@: %@"), LOC(@"Error"), error.localizedDescription];
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil message:msg preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [self presentViewController:alert animated:YES completion:nil];
-        });
-    }];
+    // UIImageWriteToSavedPhotosAlbum (same path savePFP uses) handles the add-only
+    // authorization prompt itself and avoids the PHPhotosError seen with a bare
+    // PHPhotoLibrary performChanges when access is add-only / not-yet-granted.
+    UIImageWriteToSavedPhotosAlbum(image, self, @selector(image:didFinishSavingWithError:contextInfo:), NULL);
+}
+
+- (void)image:(UIImage *)image didFinishSavingWithError:(NSError *)error contextInfo:(void *)contextInfo {
+    NSString *msg = error ? [NSString stringWithFormat:LOC(@"%@: %@"), LOC(@"Error"), error.localizedDescription] : LOC(@"Saved");
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil message:msg preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)shareTapped {
@@ -1350,7 +1376,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
          [desc rangeOfString:@"backstage" options:NSCaseInsensitiveSearch].location != NSNotFound ||
          [desc rangeOfString:@"image" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
         NSString *trimmed = desc.length > 700 ? [desc substringToIndex:700] : desc;
-        NSLog(@"[YTLITE] keepalive view: %@", trimmed);
+        NSLog(@"[YTLITE] keepalive view: %s", trimmed.UTF8String);
     }
 #endif
 
@@ -1374,7 +1400,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
     // Coordinated so they never suppress native taps; handlers no-op off-image.
     if (ytlBool(@"postManager") && ytlDescIsPost(desc)) {
 #if defined(YTL_POST_DEBUG)
-        NSLog(@"[YTLITE] attaching post gestures to: %@", desc.length > 200 ? [desc substringToIndex:200] : desc);
+        NSLog(@"[YTLITE] attaching post gestures to: %s", (desc.length > 200 ? [desc substringToIndex:200] : desc).UTF8String);
 #endif
         UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(postManager:)];
         ytlConfigureLongPress(longPress);
@@ -1385,6 +1411,9 @@ static BOOL ytlDescIsPost(NSString *desc) {
         imageTap.delaysTouchesBegan = NO;
         imageTap.delaysTouchesEnded = NO;
         imageTap.delegate = [YTLGestureCoordinator shared];
+        // Don't let a long-press also count as a tap — the tap only fires if the
+        // long-press fails (i.e. a genuine quick tap).
+        [imageTap requireGestureRecognizerToFail:longPress];
         [self addGestureRecognizer:imageTap];
     }
 }
@@ -1392,15 +1421,16 @@ static BOOL ytlDescIsPost(NSString *desc) {
 %new
 - (void)postImageTap:(UITapGestureRecognizer *)sender {
     if (sender.state != UIGestureRecognizerStateEnded) return;
-    ASDisplayNode *containerNode = (ASDisplayNode *)self.keepalive_node;
-    if (!containerNode) return;
     CGPoint point = [sender locationInView:self];
-    NSURL *url = imageURLAtPoint(containerNode, point, 0);
+    NSURL *url = ytlImageURLForView(self, point);
 #if defined(YTL_POST_DEBUG)
-    NSLog(@"[YTLITE] postImageTap at {%.0f,%.0f} -> url=%@", point.x, point.y, url.absoluteString ?: @"(none)");
+    UIView *hv = [self hitTest:point withEvent:nil];
+    NSLog(@"[YTLITE] postImageTap at {%.0f,%.0f} hit=%s -> url=%s", point.x, point.y,
+          hv ? NSStringFromClass([hv class]).UTF8String : "nil",
+          url ? url.absoluteString.UTF8String : "(none)");
 #endif
     if (!url) return;
-    [YTLImageViewer presentWithURL:url from:containerNode.closestViewController];
+    [YTLImageViewer presentWithURL:url from:self.keepalive_node.closestViewController];
 }
 
 %new
@@ -1446,8 +1476,11 @@ static BOOL ytlDescIsPost(NSString *desc) {
         ELMContainerNode *nodeForLayer = (ELMContainerNode *)self.keepalive_node.yogaChildren[0];
         ELMContainerNode *containerNode = (ELMContainerNode *)self.keepalive_node;
         NSString *text = containerNode.copiedComment;
-        // Prefer URL captured by YTImageZoomNode hook; fall back to scanning the node tree directly.
-        NSURL *URL = containerNode.copiedURL ?: findImageURLInNode((ASDisplayNode *)containerNode, 0);
+        // Resolve the image under the finger first (works in the community carousel where
+        // the image is in a nested cell), then fall back to captured/first-in-subtree URL.
+        NSURL *URL = ytlImageURLForView(self, [sender locationInView:self])
+                     ?: containerNode.copiedURL
+                     ?: findImageURLInNode((ASDisplayNode *)containerNode, 0);
         CALayer *layer = nodeForLayer.layer;
         UIColor *backgroundColor = containerNode.closestViewController.view.backgroundColor;
 
