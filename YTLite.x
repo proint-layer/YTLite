@@ -1125,6 +1125,198 @@ static void ytlConfigureLongPress(UILongPressGestureRecognizer *lp) {
     lp.delegate = [YTLGestureCoordinator shared];
 }
 
+// Depth-first search of the node tree for an ASNetworkImageNode whose frame
+// contains `p` (p expressed in `node`'s own coordinate space). Node frames are
+// in the supernode's space, so we translate the point as we descend. Used to
+// decide whether a tap on the post container landed on an image, and which one.
+static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
+    if (!node || depth > 12) return nil;
+    for (ASDisplayNode *child in node.yogaChildren) {
+        CGRect f = child.frame;
+        if (CGRectIsEmpty(f) || !CGRectContainsPoint(f, p)) continue;
+        CGPoint cp = CGPointMake(p.x - f.origin.x, p.y - f.origin.y);
+        if ([child isKindOfClass:NSClassFromString(@"ASNetworkImageNode")]) {
+            NSURL *u = ((ASNetworkImageNode *)child).URL;
+            if (u) return u;
+        }
+        NSURL *deeper = imageURLAtPoint(child, cp, depth + 1);
+        if (deeper) return deeper;
+    }
+    return nil;
+}
+
+// Self-contained fullscreen zoomable image viewer. YouTube's native
+// tap-to-fullscreen for community-post images (didTapBackstageImageView: ->
+// YTBackstageFullscreenImageViewController) is gated behind the server hot-config
+// experiment iosPostImageGalleryStart and does nothing when that experiment is off.
+// The current closed-source YTLite 5.2.1 solves this the same way: it ships its own
+// viewer (DVNImageViewController) instead of relying on the native path.
+@interface YTLImageViewer : UIViewController <UIScrollViewDelegate>
+@property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) UIImageView *imageView;
+@property (nonatomic, strong) UIActivityIndicatorView *spinner;
+@property (nonatomic, strong) UIButton *closeButton;
+@property (nonatomic, strong) UIButton *saveButton;
+@property (nonatomic, strong) UIButton *shareButton;
+@property (nonatomic, strong) NSURL *sourceURL;
++ (void)presentWithURL:(NSURL *)url from:(UIViewController *)presenter;
+@end
+
+@implementation YTLImageViewer
+
++ (void)presentWithURL:(NSURL *)url from:(UIViewController *)presenter {
+    if (!url) return;
+    UIViewController *host = presenter;
+    while (host.presentedViewController) host = host.presentedViewController;
+    if (!host) {
+        UIWindow *keyWindow = nil;
+        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+            if (w.isKeyWindow) { keyWindow = w; break; }
+        }
+        if (!keyWindow) keyWindow = UIApplication.sharedApplication.windows.firstObject;
+        host = keyWindow.rootViewController;
+    }
+    if (!host) return;
+    YTLImageViewer *vc = [YTLImageViewer new];
+    NSString *maxRes = ytMaxResURLString(url.absoluteString);
+    vc.sourceURL = [NSURL URLWithString:maxRes] ?: url;
+    vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    [host presentViewController:vc animated:YES completion:nil];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor blackColor];
+
+    self.scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
+    self.scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.scrollView.delegate = self;
+    self.scrollView.minimumZoomScale = 1.0;
+    self.scrollView.maximumZoomScale = 4.0;
+    self.scrollView.showsHorizontalScrollIndicator = NO;
+    self.scrollView.showsVerticalScrollIndicator = NO;
+    self.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    [self.view addSubview:self.scrollView];
+
+    self.imageView = [[UIImageView alloc] initWithFrame:self.scrollView.bounds];
+    self.imageView.contentMode = UIViewContentModeScaleAspectFit;
+    self.imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.scrollView addSubview:self.imageView];
+
+    self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+    self.spinner.color = [UIColor whiteColor];
+    [self.spinner startAnimating];
+    [self.view addSubview:self.spinner];
+
+    self.closeButton = [self chromeButtonWithSystemImage:@"xmark" action:@selector(closeTapped)];
+    self.saveButton = [self chromeButtonWithSystemImage:@"square.and.arrow.down" action:@selector(saveTapped)];
+    self.shareButton = [self chromeButtonWithSystemImage:@"square.and.arrow.up" action:@selector(shareTapped)];
+    [self.view addSubview:self.closeButton];
+    [self.view addSubview:self.saveButton];
+    [self.view addSubview:self.shareButton];
+
+    UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
+    doubleTap.numberOfTapsRequired = 2;
+    [self.view addGestureRecognizer:doubleTap];
+
+    UITapGestureRecognizer *singleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(closeTapped)];
+    singleTap.numberOfTapsRequired = 1;
+    [singleTap requireGestureRecognizerToFail:doubleTap];
+    [self.view addGestureRecognizer:singleTap];
+
+    [self loadImage];
+}
+
+- (UIButton *)chromeButtonWithSystemImage:(NSString *)name action:(SEL)action {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIImage *img = [UIImage systemImageNamed:name];
+    [b setImage:img forState:UIControlStateNormal];
+    b.tintColor = [UIColor whiteColor];
+    b.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+    b.layer.cornerRadius = 20.0;
+    b.frame = CGRectMake(0, 0, 40, 40);
+    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    self.spinner.center = CGPointMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds));
+    UIEdgeInsets safe = self.view.safeAreaInsets;
+    CGFloat top = safe.top + 8;
+    CGFloat right = self.view.bounds.size.width - safe.right - 8 - 40;
+    self.closeButton.frame = CGRectMake(safe.left + 8, top, 40, 40);
+    self.shareButton.frame = CGRectMake(right, top, 40, 40);
+    self.saveButton.frame = CGRectMake(right - 48, top, 40, 40);
+}
+
+- (void)loadImage {
+    NSURL *url = self.sourceURL;
+    NSURLSession *session = [NSURLSession sharedSession];
+    [[session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        UIImage *image = data ? [UIImage imageWithData:data] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.spinner stopAnimating];
+            if (image) {
+                self.imageView.image = image;
+            } else {
+                [self closeTapped];
+            }
+        });
+    }] resume];
+}
+
+- (UIView *)viewForZoomingInScrollView:(UIScrollView *)scrollView { return self.imageView; }
+
+- (void)scrollViewDidZoom:(UIScrollView *)scrollView {
+    CGSize bounds = scrollView.bounds.size;
+    CGSize content = scrollView.contentSize;
+    CGFloat offsetX = content.width < bounds.width ? (bounds.width - content.width) / 2.0 : 0;
+    CGFloat offsetY = content.height < bounds.height ? (bounds.height - content.height) / 2.0 : 0;
+    self.imageView.center = CGPointMake(content.width / 2.0 + offsetX, content.height / 2.0 + offsetY);
+}
+
+- (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
+    if (self.scrollView.zoomScale > self.scrollView.minimumZoomScale) {
+        [self.scrollView setZoomScale:self.scrollView.minimumZoomScale animated:YES];
+    } else {
+        CGPoint pt = [gesture locationInView:self.imageView];
+        CGFloat scale = 2.5;
+        CGSize size = self.scrollView.bounds.size;
+        CGRect rect = CGRectMake(pt.x - (size.width / scale) / 2.0, pt.y - (size.height / scale) / 2.0, size.width / scale, size.height / scale);
+        [self.scrollView zoomToRect:rect animated:YES];
+    }
+}
+
+- (void)closeTapped { [self dismissViewControllerAnimated:YES completion:nil]; }
+
+- (void)saveTapped {
+    UIImage *image = self.imageView.image;
+    if (!image) return;
+    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+        [PHAssetChangeRequest creationRequestForAssetFromImage:image];
+    } completionHandler:^(BOOL success, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *msg = success ? LOC(@"Saved") : [NSString stringWithFormat:LOC(@"%@: %@"), LOC(@"Error"), error.localizedDescription];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil message:msg preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+    }];
+}
+
+- (void)shareTapped {
+    UIImage *image = self.imageView.image;
+    if (!image) return;
+    UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[image] applicationActivities:nil];
+    av.popoverPresentationController.sourceView = self.shareButton;
+    av.popoverPresentationController.sourceRect = self.shareButton.bounds;
+    [self presentViewController:av animated:YES completion:nil];
+}
+
+@end
+
 %hook _ASDisplayView
 - (void)setKeepalive_node:(id)arg1 {
     %orig;
@@ -1145,6 +1337,29 @@ static void ytlConfigureLongPress(UILongPressGestureRecognizer *lp) {
             break;
         }
     }
+
+    // Tap-to-open the fullscreen viewer for community-post images. Coordinated so it
+    // never suppresses native taps (post detail, buttons); the handler only acts when
+    // the tap actually lands on an image node, otherwise it is a no-op.
+    if (ytlBool(@"postManager") && [[self description] containsString:@"id.ui.backstage.original_post"]) {
+        UITapGestureRecognizer *imageTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(postImageTap:)];
+        imageTap.cancelsTouchesInView = NO;
+        imageTap.delaysTouchesBegan = NO;
+        imageTap.delaysTouchesEnded = NO;
+        imageTap.delegate = [YTLGestureCoordinator shared];
+        [self addGestureRecognizer:imageTap];
+    }
+}
+
+%new
+- (void)postImageTap:(UITapGestureRecognizer *)sender {
+    if (sender.state != UIGestureRecognizerStateEnded) return;
+    ASDisplayNode *containerNode = (ASDisplayNode *)self.keepalive_node;
+    if (!containerNode) return;
+    CGPoint point = [sender locationInView:self];
+    NSURL *url = imageURLAtPoint(containerNode, point, 0);
+    if (!url) return;
+    [YTLImageViewer presentWithURL:url from:containerNode.closestViewController];
 }
 
 %new
@@ -1205,6 +1420,10 @@ static void ytlConfigureLongPress(UILongPressGestureRecognizer *lp) {
         }]];
 
         if (URL) {
+            [sheetController addAction:[%c(YTActionSheetAction) actionWithTitle:@"Open Image" iconImage:YTImageNamed(@"yt_outline_youtube_search_24pt") style:0 handler:^ {
+                [YTLImageViewer presentWithURL:URL from:containerNode.closestViewController];
+            }]];
+
             [sheetController addAction:[%c(YTActionSheetAction) actionWithTitle:LOC(@"SaveCurrentImage") iconImage:YTImageNamed(@"yt_outline_image_24pt") style:0 handler:^ {
                 downloadImageFromURL(containerNode.closestViewController, URL, YES);
             }]];
