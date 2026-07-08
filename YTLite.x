@@ -951,18 +951,18 @@ static BOOL isOverlayShown = YES;
 }
 %end
 
-// Strips YouTube CDN size params (=wN, =sN, =wN-hM-...) to request original/max resolution.
-// Google's image serving API returns the full-size original when no size param is present.
+// Requests the original full-resolution image from a Google image CDN (ggpht /
+// googleusercontent). The options string follows the first '=' (e.g.
+// "=s800-c-fcrop64=1,…-rw-nd-v1"); replacing the whole thing with "=s0" drops the
+// downscale and crop and returns the original. "=s0" gives better full-res results
+// than merely stripping the size token. Non-Google URLs are returned unchanged.
 static NSString *ytMaxResURLString(NSString *urlString) {
-    NSRange eqRange = [urlString rangeOfString:@"=" options:NSBackwardsSearch];
-    if (eqRange.location == NSNotFound) return urlString;
-    NSString *afterEq = [urlString substringFromIndex:eqRange.location + 1];
-    if (afterEq.length == 0) return urlString;
-    unichar first = [afterEq characterAtIndex:0];
-    if (first == 'w' || first == 'h' || first == 's' || first == 'd' || first == 'n') {
-        return [urlString substringToIndex:eqRange.location];
-    }
-    return urlString;
+    if (!urlString) return urlString;
+    if (![urlString containsString:@"ggpht.com"] && ![urlString containsString:@"googleusercontent.com"])
+        return urlString;
+    NSRange eqRange = [urlString rangeOfString:@"="];
+    NSString *base = (eqRange.location == NSNotFound) ? urlString : [urlString substringToIndex:eqRange.location];
+    return [base stringByAppendingString:@"=s0"];
 }
 
 // Returns a node's image URL if it exposes one (ASNetworkImageNode and subclasses,
@@ -1029,16 +1029,9 @@ static void downloadImageFromURL(UIResponder *responder, NSURL *URL, BOOL downlo
         URLString = [URLString stringByReplacingOccurrencesOfString:@"https://yt3." withString:@"https://yt4."];
     }
 
-    NSURL *downloadURL = nil;
-    if ([URLString containsString:@"c-fcrop"]) {
-        NSRange croppedURL = [URLString rangeOfString:@"c-fcrop"];
-        if (croppedURL.location != NSNotFound) {
-            NSString *newURL = [URLString stringByReplacingOccurrencesOfString:[URLString substringFromIndex:croppedURL.location] withString:@"nd-v1"];
-            downloadURL = [NSURL URLWithString:newURL];
-        }
-    } else {
-        downloadURL = [NSURL URLWithString:ytMaxResURLString(URLString)];
-    }
+    // =s0 requests the original full-res, uncropped image (better than the old
+    // c-fcrop -> nd-v1 rewrite, which kept the =s800 downscale).
+    NSURL *downloadURL = [NSURL URLWithString:ytMaxResURLString(URLString)] ?: URL;
 
     NSURLSession *session = [NSURLSession sharedSession];
     [[session dataTaskWithURL:downloadURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
