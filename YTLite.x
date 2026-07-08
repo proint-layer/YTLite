@@ -44,15 +44,17 @@ static UIImage *YTImageNamed(NSString *imageName) {
 
 %hook YTIElementRenderer
 - (NSData *)elementData {
-    if (self.hasCompatibilityOptions && self.compatibilityOptions.hasAdLoggingData && ytlBool(@"noAds")) return nil;
+    if (ytlBool(@"noAds") && self.hasCompatibilityOptions && self.compatibilityOptions.hasAdLoggingData)
+        return nil;
 
     NSString *description = [self description];
 
-    NSArray *ads = @[@"brand_promo", @"product_carousel", @"product_engagement_panel", @"product_item",
-                     @"text_search_ad", @"text_image_button_layout", @"carousel_headered_layout",
-                     @"carousel_footered_layout", @"square_image_layout", @"landscape_image_wide_button_layout",
-                     @"feed_ad_metadata", @"statement_banner", @"ad_badge", @"promoted_sparkles_text_search_ad",
-                     @"shopping_companion", @"ads_video_bar"];
+    // Only unambiguously ad-specific identifiers — generic layout names like square_image_layout,
+    // carousel_headered_layout, text_image_button_layout are shared with community post sub-renderers
+    // and must not appear here (elementData is called on every nested renderer, not just section roots).
+    NSArray *ads = @[@"brand_promo", @"text_search_ad", @"feed_ad_metadata",
+                     @"statement_banner", @"ad_badge", @"promoted_sparkles_text_search_ad",
+                     @"ads_video_bar"];
     for (NSString *ad in ads) {
         if (ytlBool(@"noAds") && [description containsString:ad])
             return [NSData data];
@@ -77,11 +79,8 @@ static BOOL isAdElementRenderer(YTIElementRenderer *elementRenderer) {
         return YES;
     NSString *desc = [elementRenderer description];
     NSArray *adStrings = @[@"brand_promo", @"product_carousel", @"product_engagement_panel",
-                           @"product_item", @"text_search_ad", @"text_image_button_layout",
-                           @"carousel_headered_layout", @"carousel_footered_layout",
-                           @"square_image_layout", @"landscape_image_wide_button_layout",
-                           @"feed_ad_metadata", @"statement_banner",
-                           @"ad_badge", @"promoted_sparkles_text_search_ad",
+                           @"product_item", @"text_search_ad", @"feed_ad_metadata",
+                           @"statement_banner", @"ad_badge", @"promoted_sparkles_text_search_ad",
                            @"shopping_companion", @"ads_video_bar"];
     for (NSString *adStr in adStrings) {
         if ([desc containsString:adStr]) return YES;
