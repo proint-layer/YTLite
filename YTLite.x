@@ -951,18 +951,22 @@ static BOOL isOverlayShown = YES;
 }
 %end
 
-// Requests the original full-resolution image from a Google image CDN (ggpht /
-// googleusercontent). The options string follows the first '=' (e.g.
-// "=s800-c-fcrop64=1,…-rw-nd-v1"); replacing the whole thing with "=s0" drops the
-// downscale and crop and returns the original. "=s0" gives better full-res results
-// than merely stripping the size token. Non-Google URLs are returned unchanged.
-static NSString *ytMaxResURLString(NSString *urlString) {
+// Rewrites a Google image CDN URL (ggpht / googleusercontent) to a given size option.
+// The options string follows the first '=' (e.g. "=s800-c-fcrop64=1,…-rw-nd-v1");
+// replacing it drops the crop/downscale. sizeOption is e.g. "=s0" (original) or
+// "=s2048". Non-Google URLs are returned unchanged.
+static NSString *ytSizedURLString(NSString *urlString, NSString *sizeOption) {
     if (!urlString) return urlString;
     if (![urlString containsString:@"ggpht.com"] && ![urlString containsString:@"googleusercontent.com"])
         return urlString;
     NSRange eqRange = [urlString rangeOfString:@"="];
     NSString *base = (eqRange.location == NSNotFound) ? urlString : [urlString substringToIndex:eqRange.location];
-    return [base stringByAppendingString:@"=s0"];
+    return [base stringByAppendingString:sizeOption];
+}
+
+// "=s0" is the original full resolution — better than merely stripping the size token.
+static NSString *ytMaxResURLString(NSString *urlString) {
+    return ytSizedURLString(urlString, @"=s0");
 }
 
 // Returns a node's image URL if it exposes one (ASNetworkImageNode and subclasses,
@@ -1249,6 +1253,7 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong) NSData *imageData;
 @property (nonatomic, strong) NSURL *url;
+@property (nonatomic, assign) BOOL fullLoaded;
 @property (nonatomic, copy) void (^onZoomChanged)(void);
 - (instancetype)initWithFrame:(CGRect)frame url:(NSURL *)url;
 - (BOOL)isZoomedIn;
@@ -1287,15 +1292,35 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
     return self;
 }
 
+// Progressive load: a fast ~2048px preview appears almost immediately, then the =s0
+// original replaces it (and its bytes are kept for full-res save). Avoids the long wait
+// on huge originals while still ending up full resolution.
 - (void)load {
+    NSString *base = self.url.absoluteString;
+    NSURL *previewURL = [NSURL URLWithString:ytSizedURLString(base, @"=s2048")] ?: self.url;
+    NSURL *fullURL = self.url;
     __weak typeof(self) weakSelf = self;
-    [[[NSURLSession sharedSession] dataTaskWithURL:self.url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+
+    [[[NSURLSession sharedSession] dataTaskWithURL:previewURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         UIImage *image = data ? [UIImage imageWithData:data] : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) self = weakSelf;
-            if (!self) return;
+            if (!self || !image || self.fullLoaded) return;
             [self.spinner stopAnimating];
-            if (image) { self.imageData = data; self.imageView.image = image; }
+            self.imageView.image = image;
+            if (!self.imageData) self.imageData = data; // fallback for save until full arrives
+        });
+    }] resume];
+
+    [[[NSURLSession sharedSession] dataTaskWithURL:fullURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        UIImage *image = data ? [UIImage imageWithData:data] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self || !image) return;
+            [self.spinner stopAnimating];
+            self.fullLoaded = YES;
+            self.imageData = data;
+            self.imageView.image = image;
         });
     }] resume];
 }
@@ -1595,10 +1620,33 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 
 @end
 
-// Collects, in traversal order, the large post-photo URLs in a node subtree, deduped by
-// their =s0-normalized form. Best-effort: only realized image nodes are reachable, so a
-// multi-image post whose off-screen images aren't laid out yet may yield a subset.
-static void ytlCollectPostImages(ASDisplayNode *node, int depth, NSMutableArray<NSURL *> *out) {
+// Appends any community-post photo URLs found in a string (a node/element/renderer
+// description) to `out`, in order, deduped by =s0-normalized form. Post attachment images
+// carry a "-fcrop64" crop directive, which distinguishes them from avatars/emoji/badges.
+// This reads the post's model text, so it finds ALL images even ones not yet realized in
+// the lazily-loaded carousel.
+static void ytlAddPhotoURLsFromString(NSString *s, NSMutableArray<NSURL *> *out) {
+    if (s.length == 0) return;
+    NSScanner *sc = [NSScanner scannerWithString:s];
+    sc.charactersToBeSkipped = nil;
+    NSCharacterSet *stops = [NSCharacterSet characterSetWithCharactersInString:@" \t\n\r\f\"'<>(){}[]\\|,;"];
+    while (![sc isAtEnd]) {
+        if (![sc scanUpToString:@"https://" intoString:NULL]) break;
+        NSString *candidate = nil;
+        if (![sc scanUpToCharactersFromSet:stops intoString:&candidate] || candidate.length == 0) continue;
+        if (![candidate containsString:@"ggpht.com"] && ![candidate containsString:@"googleusercontent.com"]) continue;
+        if (![candidate containsString:@"fcrop64"]) continue; // exclude avatars/badges
+        if (out.count >= 30) break;
+        NSString *norm = ytMaxResURLString(candidate);
+        BOOL dup = NO;
+        for (NSURL *u in out) { if ([ytMaxResURLString(u.absoluteString) isEqualToString:norm]) { dup = YES; break; } }
+        if (!dup) { NSURL *nu = [NSURL URLWithString:norm]; if (nu) [out addObject:nu]; }
+    }
+}
+
+// Collects, in traversal order, the large post-photo URLs among realized image nodes in a
+// subtree (deduped). Only a fallback — off-screen carousel images aren't reachable here.
+static void ytlCollectRealizedPostImages(ASDisplayNode *node, int depth, NSMutableArray<NSURL *> *out) {
     if (!node || depth > 16 || out.count >= 30) return;
     NSURL *own = nodeImageURL(node);
     if (own && ytlIsPostPhotoURL(own)) {
@@ -1610,25 +1658,54 @@ static void ytlCollectPostImages(ASDisplayNode *node, int depth, NSMutableArray<
             if (!dup) [out addObject:own];
         }
     }
-    for (ASDisplayNode *child in node.yogaChildren) ytlCollectPostImages(child, depth + 1, out);
+    for (ASDisplayNode *child in node.yogaChildren) ytlCollectRealizedPostImages(child, depth + 1, out);
     if ([node respondsToSelector:@selector(subnodes)]) {
-        for (ASDisplayNode *child in [node valueForKey:@"subnodes"]) ytlCollectPostImages(child, depth + 1, out);
+        for (ASDisplayNode *child in [node valueForKey:@"subnodes"]) ytlCollectRealizedPostImages(child, depth + 1, out);
     }
 }
 
-// Opens the gallery for a post: gathers all its images (so the viewer can page between
-// them) and starts on the tapped one. Falls back to just the tapped image if collection
-// can't locate it in the subtree.
+// Opens the gallery for a post: gathers ALL its images so the viewer can page between them
+// (primary source is the element/renderer description, which lists every image even ones
+// not yet realized; falls back to the realized node walk), starting on the tapped one.
 static void ytlPresentGallery(ASDisplayNode *root, NSURL *tapped, UIViewController *host) {
     if (!tapped) return;
     NSMutableArray<NSURL *> *all = [NSMutableArray array];
-    ytlCollectPostImages(root, 0, all);
+
+    // Source 1: the post's model text. ELMContainerNode.element (and the node's own
+    // description) render the backstage renderer, which enumerates all attachment images.
+    @try {
+        id element = [root respondsToSelector:@selector(valueForKey:)] ? [root valueForKey:@"element"] : nil;
+        if (element) ytlAddPhotoURLsFromString([element description], all);
+    } @catch (__unused NSException *e) {}
+    NSUInteger fromElement = all.count;
+    if (all.count < 2) {
+        @try { ytlAddPhotoURLsFromString([root description], all); } @catch (__unused NSException *e) {}
+    }
+    NSUInteger fromDesc = all.count;
+
+    // Source 2 (fallback/supplement): realized image nodes.
+    NSMutableArray<NSURL *> *walk = [NSMutableArray array];
+    ytlCollectRealizedPostImages(root, 0, walk);
+    for (NSURL *u in walk) {
+        NSString *norm = ytMaxResURLString(u.absoluteString);
+        BOOL dup = NO;
+        for (NSURL *e in all) { if ([ytMaxResURLString(e.absoluteString) isEqualToString:norm]) { dup = YES; break; } }
+        if (!dup) [all addObject:[NSURL URLWithString:norm] ?: u];
+    }
+
     NSString *tappedNorm = ytMaxResURLString(tapped.absoluteString);
     NSInteger idx = NSNotFound;
     for (NSInteger i = 0; i < (NSInteger)all.count; i++) {
         if ([ytMaxResURLString(all[i].absoluteString) isEqualToString:tappedNorm]) { idx = i; break; }
     }
-    if (idx == NSNotFound) { all = [NSMutableArray arrayWithObject:tapped]; idx = 0; }
+    if (idx == NSNotFound) {
+        // Ensure the tapped image is present and selected.
+        [all insertObject:([NSURL URLWithString:tappedNorm] ?: tapped) atIndex:0];
+        idx = 0;
+    }
+#if defined(YTL_POST_DEBUG)
+    YTLDBG(@"gallery sources: element=%lu desc=%lu walk=%lu total=%lu", (unsigned long)fromElement, (unsigned long)fromDesc, (unsigned long)walk.count, (unsigned long)all.count);
+#endif
     [YTLImageViewer presentWithURLs:all index:idx from:host];
 }
 
