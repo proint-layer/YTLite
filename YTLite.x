@@ -1093,6 +1093,45 @@ static void genImageFromLayer(CALayer *layer, UIColor *backgroundColor, void (^c
 
     return %orig;
 }
+
+- (void)didLoad {
+    %orig;
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:self action:@selector(ytlDownloadPostImage:)];
+    lp.minimumPressDuration = 0.5;
+    lp.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:lp];
+}
+
+%new
+- (void)ytlDownloadPostImage:(UILongPressGestureRecognizer *)sender {
+    if (sender.state != UIGestureRecognizerStateBegan) return;
+
+    ASDisplayNode *selfNode = (ASDisplayNode *)self;
+    BOOL isInPost = NO;
+    for (id supernode in selfNode.supernodes.allObjects) {
+        if ([[supernode description] containsString:@"id.ui.backstage.original_post"]) {
+            isInPost = YES;
+            break;
+        }
+    }
+    if (!isInPost) return;
+
+    NSURL *url = ((ASNetworkImageNode *)self).URL;
+    if (!url) return;
+
+    UIViewController *vc = selfNode.closestViewController;
+    YTDefaultSheetController *sheet = [%c(YTDefaultSheetController) sheetControllerWithParentResponder:nil];
+    [sheet addAction:[%c(YTActionSheetAction) actionWithTitle:LOC(@"SaveCurrentImage")
+        iconImage:YTImageNamed(@"yt_outline_image_24pt") style:0 handler:^{
+        downloadImageFromURL(vc, url, YES);
+    }]];
+    [sheet addAction:[%c(YTActionSheetAction) actionWithTitle:LOC(@"CopyCurrentImage")
+        iconImage:YTImageNamed(@"yt_outline_library_image_24pt") style:0 handler:^{
+        downloadImageFromURL(vc, url, NO);
+    }]];
+    [sheet presentFromViewController:vc animated:YES completion:nil];
+}
 %end
 
 %hook _ASDisplayView
@@ -1111,6 +1150,7 @@ static void genImageFromLayer(CALayer *layer, UIColor *backgroundColor, void (^c
         if ([gestureInfo[@"key"] boolValue] && [[self description] containsString:gestureInfo[@"text"]]) {
             UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:selector];
             longPress.minimumPressDuration = 0.3;
+            longPress.cancelsTouchesInView = NO;
             [self addGestureRecognizer:longPress];
             break;
         }
