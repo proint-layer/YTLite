@@ -1076,7 +1076,7 @@ static void genImageFromLayer(CALayer *layer, UIColor *backgroundColor, void (^c
 
 %hook YTImageZoomNode
 - (BOOL)gestureRecognizer:(id)arg1 shouldRecognizeSimultaneouslyWithGestureRecognizer:(id)arg2 {
-    BOOL isImageLoaded = [self valueForKey:@"_didLoadImage"];
+    BOOL isImageLoaded = [[self valueForKey:@"_didLoadImage"] boolValue];
     if (ytlBool(@"postManager") && isImageLoaded) {
         ASDisplayNode *displayNode = (ASDisplayNode *)self;
         ASNetworkImageNode *imageNode = (ASNetworkImageNode *)self;
@@ -1093,46 +1093,37 @@ static void genImageFromLayer(CALayer *layer, UIColor *backgroundColor, void (^c
 
     return %orig;
 }
-
-- (void)didLoad {
-    %orig;
-    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-        initWithTarget:self action:@selector(ytlDownloadPostImage:)];
-    lp.minimumPressDuration = 0.5;
-    lp.cancelsTouchesInView = NO;
-    [self.view addGestureRecognizer:lp];
-}
-
-%new
-- (void)ytlDownloadPostImage:(UILongPressGestureRecognizer *)sender {
-    if (sender.state != UIGestureRecognizerStateBegan) return;
-
-    ASDisplayNode *selfNode = (ASDisplayNode *)self;
-    BOOL isInPost = NO;
-    for (id supernode in selfNode.supernodes.allObjects) {
-        if ([[supernode description] containsString:@"id.ui.backstage.original_post"]) {
-            isInPost = YES;
-            break;
-        }
-    }
-    if (!isInPost) return;
-
-    NSURL *url = ((ASNetworkImageNode *)self).URL;
-    if (!url) return;
-
-    UIViewController *vc = selfNode.closestViewController;
-    YTDefaultSheetController *sheet = [%c(YTDefaultSheetController) sheetControllerWithParentResponder:nil];
-    [sheet addAction:[%c(YTActionSheetAction) actionWithTitle:LOC(@"SaveCurrentImage")
-        iconImage:YTImageNamed(@"yt_outline_image_24pt") style:0 handler:^{
-        downloadImageFromURL(vc, url, YES);
-    }]];
-    [sheet addAction:[%c(YTActionSheetAction) actionWithTitle:LOC(@"CopyCurrentImage")
-        iconImage:YTImageNamed(@"yt_outline_library_image_24pt") style:0 handler:^{
-        downloadImageFromURL(vc, url, NO);
-    }]];
-    [sheet presentFromViewController:vc animated:YES completion:nil];
-}
 %end
+
+// Shared delegate for YTLite's injected long-press recognizers. YouTube's native
+// community-post image tap-to-fullscreen is delivered as raw touchesBegan/Ended on
+// the same _ASDisplayView we attach our long-press to. A delegate-less recognizer
+// with the default delaysTouchesEnded=YES buffers those touches and suppresses the
+// native single-tap (swipe survives because the carousel pan is on an ancestor
+// scroll view). This delegate permits simultaneous recognition so our long-press
+// coexists with — never blocks — the native tap.
+@interface YTLGestureCoordinator : NSObject <UIGestureRecognizerDelegate>
++ (instancetype)shared;
+@end
+
+@implementation YTLGestureCoordinator
++ (instancetype)shared {
+    static YTLGestureCoordinator *inst;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ inst = [YTLGestureCoordinator new]; });
+    return inst;
+}
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other { return YES; }
+@end
+
+// Configures an injected long-press so it never eats a native single-tap.
+static void ytlConfigureLongPress(UILongPressGestureRecognizer *lp) {
+    lp.minimumPressDuration = 0.3;
+    lp.cancelsTouchesInView = NO;
+    lp.delaysTouchesBegan = NO;
+    lp.delaysTouchesEnded = NO;
+    lp.delegate = [YTLGestureCoordinator shared];
+}
 
 %hook _ASDisplayView
 - (void)setKeepalive_node:(id)arg1 {
@@ -1149,8 +1140,7 @@ static void genImageFromLayer(CALayer *layer, UIColor *backgroundColor, void (^c
 
         if ([gestureInfo[@"key"] boolValue] && [[self description] containsString:gestureInfo[@"text"]]) {
             UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:selector];
-            longPress.minimumPressDuration = 0.3;
-            longPress.cancelsTouchesInView = NO;
+            ytlConfigureLongPress(longPress);
             [self addGestureRecognizer:longPress];
             break;
         }
