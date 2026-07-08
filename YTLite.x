@@ -1556,10 +1556,9 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
         case UIGestureRecognizerStateCancelled: {
             CGPoint vel = [g velocityInView:self.view];
             if (fabs(t.y) > 120.0 || fabs(vel.y) > 800.0) {
-                CGFloat dir = (t.y + vel.y) >= 0 ? 1.0 : -1.0;
+                // Fade out from wherever the drag left it — no directional re-animation.
                 [UIView animateWithDuration:0.2 animations:^{
-                    self.pager.transform = CGAffineTransformMakeTranslation(0, dir * self.view.bounds.size.height);
-                    self.view.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.0];
+                    self.view.alpha = 0.0;
                 } completion:^(BOOL finished) {
                     [self dismissViewControllerAnimated:NO completion:nil];
                 }];
@@ -1671,17 +1670,37 @@ static void ytlPresentGallery(ASDisplayNode *root, NSURL *tapped, UIViewControll
     if (!tapped) return;
     NSMutableArray<NSURL *> *all = [NSMutableArray array];
 
-    // Source 1: the post's model text. ELMContainerNode.element (and the node's own
-    // description) render the backstage renderer, which enumerates all attachment images.
+    // Source 1: the post's model text. ELMElement.protoText dumps the full backstage
+    // renderer protobuf, which enumerates every attachment image even ones not yet
+    // realized in the lazily-loaded carousel.
+    NSString *proto = nil;
     @try {
         id element = [root respondsToSelector:@selector(valueForKey:)] ? [root valueForKey:@"element"] : nil;
-        if (element) ytlAddPhotoURLsFromString([element description], all);
+        if ([element respondsToSelector:@selector(protoText)]) proto = [element valueForKey:@"protoText"];
+        if (![proto isKindOfClass:[NSString class]]) proto = nil;
+        if (proto) ytlAddPhotoURLsFromString(proto, all);
     } @catch (__unused NSException *e) {}
     NSUInteger fromElement = all.count;
     if (all.count < 2) {
         @try { ytlAddPhotoURLsFromString([root description], all); } @catch (__unused NSException *e) {}
     }
     NSUInteger fromDesc = all.count;
+#if defined(YTL_POST_DEBUG)
+    {
+        NSString *p = proto ?: @"";
+        NSUInteger g = 0, f = 0, i = 0;
+        while (i < p.length) {
+            NSRange r = [p rangeOfString:@"ggpht.com" options:0 range:NSMakeRange(i, p.length - i)];
+            if (r.location == NSNotFound) break; g++; i = r.location + r.length;
+        }
+        i = 0;
+        while (i < p.length) {
+            NSRange r = [p rangeOfString:@"fcrop64" options:0 range:NSMakeRange(i, p.length - i)];
+            if (r.location == NSNotFound) break; f++; i = r.location + r.length;
+        }
+        YTLDBG(@"protoText len=%lu ggpht=%lu fcrop64=%lu", (unsigned long)p.length, (unsigned long)g, (unsigned long)f);
+    }
+#endif
 
     // Source 2 (fallback/supplement): realized image nodes.
     NSMutableArray<NSURL *> *walk = [NSMutableArray array];
