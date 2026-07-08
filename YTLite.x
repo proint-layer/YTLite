@@ -1,5 +1,14 @@
 #import "YTLite.h"
 
+#if defined(YTL_POST_DEBUG)
+#import <os/log.h>
+// NSLog redacts dynamic %@/%s as <private>; os_log with %{public}@ prints them.
+static void ytlDbg(NSString *s) { os_log(OS_LOG_DEFAULT, "[YTLITE] %{public}@", s); }
+#define YTLDBG(...) ytlDbg([NSString stringWithFormat:__VA_ARGS__])
+#else
+#define YTLDBG(...)
+#endif
+
 static UIImage *YTImageNamed(NSString *imageName) {
     return [UIImage imageNamed:imageName inBundle:[NSBundle mainBundle] compatibleWithTraitCollection:nil];
 }
@@ -1176,6 +1185,13 @@ static void ytlConfigureLongPress(UILongPressGestureRecognizer *lp) {
 // Depth-first search of the node tree for an image node whose frame contains `p`
 // (p expressed in `node`'s own coordinate space). Node frames are in the supernode's
 // space, so we translate the point as we descend.
+// Minimum edge length (pt) for a node to count as a tappable post photo. Excludes
+// avatars/badges/icons (~24–56pt) so tapping the header/"read more"/avatar doesn't open
+// the profile picture — only a real attached image (which is large) qualifies.
+static const CGFloat kYTLMinImageEdge = 100.0;
+
+// Finds the image URL strictly UNDER `p` (in `node`'s coordinate space) by frame
+// containment, descending only into children whose frame contains the point.
 static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
     if (!node || depth > 14) return nil;
     for (ASDisplayNode *child in node.yogaChildren) {
@@ -1185,29 +1201,36 @@ static NSURL *imageURLAtPoint(ASDisplayNode *node, CGPoint p, int depth) {
         NSURL *deeper = imageURLAtPoint(child, cp, depth + 1);
         if (deeper) return deeper;
         NSURL *own = nodeImageURL(child);
-        if (own) return own;
+        if (own && f.size.width >= kYTLMinImageEdge && f.size.height >= kYTLMinImageEdge)
+            return own;
     }
     return nil;
 }
 
-// Finds the image URL under `point` (in rootView's coords). Primary strategy is UIView
-// hit-testing — robust to nested collection cells and scroll offsets (e.g. the
-// "Posts from …'s Community" carousel, where the image is not in the tapped container's
-// yogaChildren) — climbing from the hit view to the nearest node exposing an image URL.
-// Falls back to the frame-based node walk from the root view's own node.
+// Finds the image URL under `point` (in rootView's coords). Uses UIView hit-testing to
+// reach the tapped element (robust to nested collection cells / scroll offsets, e.g. the
+// "Posts from …'s Community" carousel), then requires the point to actually fall inside a
+// large-enough image's frame. Precise: tapping text/"read more"/empty area or an avatar
+// yields nil, so only tapping the attached photo opens the viewer.
 static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
     UIView *v = [rootView hitTest:point withEvent:nil];
-    for (int i = 0; v && i < 10; i++) {
+    for (int i = 0; v && i < 12; i++) {
         if ([v respondsToSelector:@selector(keepalive_node)]) {
-            NSURL *u = findImageURLInNode((ASDisplayNode *)[(id)v keepalive_node], 0);
-            if (u) return u;
+            ASDisplayNode *node = (ASDisplayNode *)[(id)v keepalive_node];
+            if (node) {
+                CGPoint p = [rootView convertPoint:point toView:v];
+                NSURL *inner = imageURLAtPoint(node, p, 0);
+                if (inner) return inner;
+                // The hit view itself may be the (layer-backed) image node.
+                NSURL *own = nodeImageURL(node);
+                if (own && v.bounds.size.width >= kYTLMinImageEdge &&
+                    v.bounds.size.height >= kYTLMinImageEdge && CGRectContainsPoint(v.bounds, p))
+                    return own;
+            }
         }
         v = v.superview;
     }
-    ASDisplayNode *node = nil;
-    if ([rootView respondsToSelector:@selector(keepalive_node)])
-        node = (ASDisplayNode *)[(id)rootView keepalive_node];
-    return imageURLAtPoint(node, point, 0) ?: findImageURLInNode(node, 0);
+    return nil;
 }
 
 // Self-contained fullscreen zoomable image viewer. YouTube's native
@@ -1251,7 +1274,7 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
     vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
     vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
 #if defined(YTL_POST_DEBUG)
-    NSLog(@"[YTLITE] presenting viewer for %s from %s", vc.sourceURL.absoluteString.UTF8String, NSStringFromClass([host class]).UTF8String);
+    YTLDBG(@"presenting viewer for %@ from %@", vc.sourceURL.absoluteString, NSStringFromClass([host class]));
 #endif
     [host presentViewController:vc animated:YES completion:nil];
 }
@@ -1377,7 +1400,7 @@ static NSURL *ytlImageURLForView(UIView *rootView, CGPoint point) {
 
 - (void)showSaveResult:(BOOL)success error:(NSError *)error {
 #if defined(YTL_POST_DEBUG)
-    NSLog(@"[YTLITE] viewer save success=%d error=%s", success, error ? error.localizedDescription.UTF8String : "(none)");
+    YTLDBG(@"viewer save success=%d error=%@", success, error.localizedDescription ?: @"(none)");
 #endif
     NSString *msg = success ? LOC(@"Saved") : [NSString stringWithFormat:LOC(@"%@: %@"), LOC(@"Error"), error.localizedDescription];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:nil message:msg preferredStyle:UIAlertControllerStyleAlert];
@@ -1420,7 +1443,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
          [desc rangeOfString:@"backstage" options:NSCaseInsensitiveSearch].location != NSNotFound ||
          [desc rangeOfString:@"image" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
         NSString *trimmed = desc.length > 700 ? [desc substringToIndex:700] : desc;
-        NSLog(@"[YTLITE] keepalive view: %s", trimmed.UTF8String);
+        YTLDBG(@"keepalive view: %@", trimmed);
     }
 #endif
 
@@ -1451,7 +1474,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
         }
         if (!already) {
 #if defined(YTL_POST_DEBUG)
-            NSLog(@"[YTLITE] attaching post gestures to: %s", (desc.length > 200 ? [desc substringToIndex:200] : desc).UTF8String);
+            YTLDBG(@"attaching post gestures to: %@", (desc.length > 200 ? [desc substringToIndex:200] : desc));
 #endif
             UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(postManager:)];
             ytlConfigureLongPress(longPress);
@@ -1479,9 +1502,8 @@ static BOOL ytlDescIsPost(NSString *desc) {
     NSURL *url = ytlImageURLForView(self, point);
 #if defined(YTL_POST_DEBUG)
     UIView *hv = [self hitTest:point withEvent:nil];
-    NSLog(@"[YTLITE] postImageTap at {%.0f,%.0f} hit=%s -> url=%s", point.x, point.y,
-          hv ? NSStringFromClass([hv class]).UTF8String : "nil",
-          url ? url.absoluteString.UTF8String : "(none)");
+    YTLDBG(@"postImageTap at {%.0f,%.0f} hit=%@ -> url=%@", point.x, point.y,
+           hv ? NSStringFromClass([hv class]) : @"nil", url.absoluteString ?: @"(none)");
 #endif
     if (!url) return;
     [YTLImageViewer presentWithURL:url from:self.keepalive_node.closestViewController];
