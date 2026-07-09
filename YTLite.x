@@ -13,6 +13,58 @@ static UIImage *YTImageNamed(NSString *imageName) {
     return [UIImage imageNamed:imageName inBundle:[NSBundle mainBundle] compatibleWithTraitCollection:nil];
 }
 
+// --- Multi-image community post cache ------------------------------------------------
+// A multi-image post's attachment is an EML elementRenderer whose bytes embed all its
+// image URLs, but those images render lazily so they're unreachable from the view tree at
+// tap time. We capture the ordered URL group at FEED time (in the YTIElementRenderer
+// elementData hook) and look it up when an image is tapped to page the whole set.
+static NSString *ytMaxResURLString(NSString *urlString);
+static void ytlAddPhotoURLsFromString(NSString *s, NSMutableArray<NSURL *> *out);
+
+static NSMutableArray<NSArray<NSString *> *> *gYTLImageGroups;   // each: ordered =s0 URLs
+static NSObject *gYTLImageGroupsLock;
+
+static void ytlRecordImageGroup(NSArray<NSURL *> *urls) {
+    if (urls.count < 2) return;
+    NSMutableArray<NSString *> *norm = [NSMutableArray arrayWithCapacity:urls.count];
+    for (NSURL *u in urls) [norm addObject:ytMaxResURLString(u.absoluteString)];
+    @synchronized (gYTLImageGroupsLock ?: (gYTLImageGroupsLock = [NSObject new])) {
+        if (!gYTLImageGroups) gYTLImageGroups = [NSMutableArray array];
+        for (NSArray<NSString *> *g in gYTLImageGroups) {
+            if ([g.firstObject isEqualToString:norm.firstObject]) return; // already cached
+        }
+        [gYTLImageGroups insertObject:norm atIndex:0];
+        while (gYTLImageGroups.count > 60) [gYTLImageGroups removeLastObject];
+    }
+}
+
+static NSArray<NSString *> *ytlImageGroupContaining(NSString *normURL) {
+    if (!normURL) return nil;
+    @synchronized (gYTLImageGroupsLock ?: (gYTLImageGroupsLock = [NSObject new])) {
+        for (NSArray<NSString *> *g in gYTLImageGroups) {
+            if ([g containsObject:normURL]) return g;
+        }
+    }
+    return nil;
+}
+
+// Scans a feed elementRenderer's raw EML bytes for a multi-image post's image URLs and
+// caches the group. Cheap-gated on the "fcrop64" crop marker so most renderers are skipped.
+static void ytlScanAndCacheImages(NSData *data) {
+    if (data.length == 0 || data.length > 600000) return;
+    static NSData *marker; static dispatch_once_t once;
+    dispatch_once(&once, ^{ marker = [@"fcrop64" dataUsingEncoding:NSASCIIStringEncoding]; });
+    if ([data rangeOfData:marker options:0 range:NSMakeRange(0, data.length)].location == NSNotFound) return;
+    NSString *s = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding]; // lossless byte->char
+    if (!s) return;
+    NSMutableArray<NSURL *> *found = [NSMutableArray array];
+    ytlAddPhotoURLsFromString(s, found);
+    if (found.count >= 2) {
+        ytlRecordImageGroup(found);
+        YTLDBG(@"cached image group: %lu", (unsigned long)found.count);
+    }
+}
+
 // YouTube-X (https://github.com/PoomSmart/YouTube-X/)
 // Background Playback
 %hook YTIPlayabilityStatus
@@ -53,6 +105,11 @@ static UIImage *YTImageNamed(NSString *imageName) {
 
 %hook YTIElementRenderer
 - (NSData *)elementData {
+    NSData *orig = %orig;
+
+    // Feed-time capture of multi-image community-post image groups (see cache above).
+    if (ytlBool(@"postManager")) ytlScanAndCacheImages(orig);
+
     if (ytlBool(@"noAds") && self.hasCompatibilityOptions && self.compatibilityOptions.hasAdLoggingData)
         return nil;
 
@@ -75,7 +132,7 @@ static UIImage *YTImageNamed(NSString *imageName) {
             return nil;
     }
 
-    return %orig;
+    return orig;
 }
 %end
 
@@ -1644,74 +1701,27 @@ static void ytlAddPhotoURLsFromString(NSString *s, NSMutableArray<NSURL *> *out)
 }
 
 
-// Opens the gallery for a post: gathers ALL its images so the viewer can page between them
-// (primary source is the element/renderer description, which lists every image even ones
-// not yet realized; falls back to the realized node walk), starting on the tapped one.
-// Returns the protoText of a node's ELMElement, or nil.
-static NSString *ytlNodeProtoText(id node) {
-    @try {
-        id element = [node respondsToSelector:@selector(valueForKey:)] ? [node valueForKey:@"element"] : nil;
-        if ([element respondsToSelector:@selector(protoText)]) {
-            id pt = [element valueForKey:@"protoText"];
-            if ([pt isKindOfClass:[NSString class]]) return pt;
-        }
-    } @catch (__unused NSException *e) {}
-    return nil;
-}
-
-// Opens the gallery for the image tapped at `point` in `rootView`. The post's images live
-// in a lazily-loaded carousel not under the gesture's container, so we hit-test to the
-// tapped view then climb its ancestors, reading each node's ELMElement.protoText (the full
-// renderer protobuf, which lists every attachment image); the ancestor whose protoText
-// yields the most images is the attachment container. Falls back to the single tapped URL.
+// Opens the gallery for the tapped image. If a multi-image group containing it was cached
+// at feed time (from the elementRenderer's EML bytes), pages the whole ordered group
+// starting on the tapped image; otherwise shows just the tapped image. rootView/point are
+// unused now (kept for call-site symmetry).
 static void ytlPresentGalleryForView(UIView *rootView, CGPoint point, NSURL *tapped, UIViewController *host) {
+    (void)rootView; (void)point;
     if (!tapped) return;
-    NSMutableArray<NSURL *> *best = [NSMutableArray array];
-#if defined(YTL_POST_DEBUG)
-    NSString *sampleProto = nil; NSUInteger sampleGgpht = 0;
-#endif
-    UIView *v = [rootView hitTest:point withEvent:nil];
-    for (int i = 0; v && i < 14; i++) {
-        if ([v respondsToSelector:@selector(keepalive_node)]) {
-            NSString *proto = ytlNodeProtoText([(id)v keepalive_node]);
-            if (proto.length) {
-                NSMutableArray<NSURL *> *found = [NSMutableArray array];
-                ytlAddPhotoURLsFromString(proto, found);
-                if (found.count > best.count) best = found;
-#if defined(YTL_POST_DEBUG)
-                NSUInteger g = 0, idx = 0;
-                while (idx < proto.length) {
-                    NSRange r = [proto rangeOfString:@"ggpht" options:0 range:NSMakeRange(idx, proto.length - idx)];
-                    if (r.location == NSNotFound) break; g++; idx = r.location + r.length;
-                }
-                if (g > sampleGgpht) { sampleGgpht = g; sampleProto = proto; }
-#endif
-            }
-        }
-        if (best.count >= 2) break;
-        v = v.superview;
-    }
-
-    NSMutableArray<NSURL *> *all = [NSMutableArray arrayWithArray:best];
     NSString *tappedNorm = ytMaxResURLString(tapped.absoluteString);
-    NSInteger idx = NSNotFound;
-    for (NSInteger i = 0; i < (NSInteger)all.count; i++) {
-        if ([ytMaxResURLString(all[i].absoluteString) isEqualToString:tappedNorm]) { idx = i; break; }
-    }
-    if (idx == NSNotFound) {
-        [all insertObject:([NSURL URLWithString:tappedNorm] ?: tapped) atIndex:0];
-        idx = 0;
+    NSMutableArray<NSURL *> *all = [NSMutableArray array];
+    NSInteger idx = 0;
+
+    NSArray<NSString *> *group = ytlImageGroupContaining(tappedNorm);
+    if (group.count >= 2) {
+        for (NSString *g in group) { NSURL *u = [NSURL URLWithString:g]; if (u) [all addObject:u]; }
+        NSInteger gi = [group indexOfObject:tappedNorm];
+        idx = (gi == NSNotFound) ? 0 : gi;
+    } else {
+        [all addObject:([NSURL URLWithString:tappedNorm] ?: tapped)];
     }
 #if defined(YTL_POST_DEBUG)
-    YTLDBG(@"gallery: best=%lu total=%lu sampleGgpht=%lu sampleLen=%lu", (unsigned long)best.count, (unsigned long)all.count, (unsigned long)sampleGgpht, (unsigned long)sampleProto.length);
-    if (sampleProto.length) {
-        NSRange gr = [sampleProto rangeOfString:@"ggpht"];
-        if (gr.location != NSNotFound) {
-            NSInteger start = MAX(0, (NSInteger)gr.location - 80);
-            NSInteger len = MIN(300, (NSInteger)sampleProto.length - start);
-            YTLDBG(@"proto sample: %@", [sampleProto substringWithRange:NSMakeRange(start, len)]);
-        }
-    }
+    YTLDBG(@"gallery: group=%lu total=%lu index=%ld", (unsigned long)group.count, (unsigned long)all.count, (long)idx);
 #endif
     [YTLImageViewer presentWithURLs:all index:idx from:host];
 }
