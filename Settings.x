@@ -611,22 +611,4 @@ static NSString *GetCacheSize() {
         return;
     } %orig;
 }
-
-%new
-- (UIImage *)resizedImageNamed:(NSString *)iconName {
-
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(32, 32)];
-    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull rendererContext) {
-        UIView *imageView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 32, 32)];
-        UIImageView *iconImageView = [[UIImageView alloc] initWithImage:[UIImage imageWithContentsOfFile:[NSBundle.ytl_defaultBundle pathForResource:iconName ofType:@"png"]]];
-        iconImageView.contentMode = UIViewContentModeScaleAspectFit;
-        iconImageView.clipsToBounds = YES;
-        iconImageView.frame = imageView.bounds;
-
-        [imageView addSubview:iconImageView];
-        [imageView.layer renderInContext:rendererContext.CGContext];
-    }];
-
-    return image;
-}
 %end

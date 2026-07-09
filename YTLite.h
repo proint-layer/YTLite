@@ -22,15 +22,9 @@
 @property (nonatomic, strong, readwrite) UIColor *onTintColor;
 @end
 
-@interface YTSettingsCell ()
-- (void)setIndicatorIcon:(int)icon;
-- (void)setTitleDescription:(id)titleDescription;
-@end
-
 @interface YTSettingsSectionItemManager (Custom)
 - (YTSettingsSectionItem *)switchWithTitle:(NSString *)title key:(NSString *)key;
 - (YTSettingsSectionItem *)linkWithTitle:(NSString *)title description:(NSString *)description link:(NSString *)link;
-- (UIImage *)resizedImageNamed:(NSString *)iconName;
 @end
 
 @interface YTLightweightQTMButton ()
@@ -259,7 +253,6 @@
 @interface ASDisplayNode ()
 @property (nonatomic, assign, readonly) UIViewController *closestViewController;
 @property (atomic, assign, readonly) ASNodeAncestryEnumerator *supernodes;
-// @property (atomic, copy, readwrite) NSArray *yogaChildren;
 @property (atomic) CALayer *layer;
 @end
 

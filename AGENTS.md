@@ -1,0 +1,107 @@
+# AGENTS.md — LibreYTLite
+
+This file orients human and AI contributors working in this repo. Read it before making changes.
+
+## 1. What this project is
+
+LibreYTLite is a clean, **from-source** open fork of [YTLite](https://github.com/Dayanch96/YTLite), an iOS tweak that patches the stock YouTube app to add ad-blocking, background playback, quality/speed unlocks, UI cleanup, and download helpers. It is written in Objective-C using **Theos + Logos** and is injected into a decrypted YouTube IPA for sideloading (rootless-capable).
+
+**Philosophy — from source, no DRM.** The fork is branched from the last MIT-licensed release of upstream YTLite (`Copyright (c) 2023 dayanch96`, see `LICENSE`) before that project went closed-source. The closed 5.x line ships a separately-injected DRM binary and obfuscates its identifier strings with XOR encoding. This fork deliberately contains **only buildable source** — no pre-built blobs, no DRM, no obfuscation — so the entire tweak can be audited and compiled by anyone. When adding code, never introduce a pre-compiled binary dependency or anything that can't be built from source in CI.
+
+Note the internal name is still `YTLite`: the tweak target, the `com.dvntm.ytlite` package/defaults suite, and the `YTLite.bundle` resource bundle all keep the upstream names for drop-in compatibility. "LibreYTLite" is the fork's public identity only.
+
+## 2. Repo layout
+
+```
+YTLite.x            Main tweak — all runtime/player/feed/ad hooks (~2200 lines)
+Settings.x          In-app settings UI (hooks YTSettingsSectionItemManager etc.)
+Sideloading.x       Keychain access-group + bundle-ID patching for sideloaded IPAs
+YTNativeShare.x     Native iOS share sheet integration
+YTLite.h            Shared header: LOC/ytlBool macros + private class/method decls
+YouTubeHeaders.h    Imports of PoomSmart YouTubeHeader classes used across the tweak
+YTLite.plist        Logos filter — loads only into com.google.ios.youtube
+Makefile            Theos build config
+control             dpkg control (package com.dvntm.ytlite)
+Utils/
+  YTLUserDefaults.{h,m}   Settings store (NSUserDefaults suite) + registerDefaults
+  NSBundle+YTLite.{h,m}   ytl_defaultBundle lookup backing LOC()
+  Reachability.{h,m}      Network reachability helper (vendored — leave as-is)
+layout/Library/Application Support/YTLite.bundle/
+                    Localization (.lproj/Localizable.strings) + assets, staged into the package
+tweaks/             Optional features as git submodules (see .gitmodules)
+.github/workflows/build.yml   CI: build tweaks + inject into IPA
+```
+
+`YTClean/`, `HANDOFF.md`, `*.ipa`, `*.deb`, and `.theos/` are gitignored local artifacts (not in the repo). If you have a local `HANDOFF.md`, ignore it — it is a stale pre-fork plan (it predates the rename of `Tweak.x` → `YTLite.x`, the switch from azule → cyan, and iSponsorBlock replacing a hand-written SponsorBlock).
+
+## 3. Architecture
+
+**Logos hooks.** Behavior is added by `%hook <Class> … %end` blocks with `%orig` to call through, `%new` for injected methods/properties, and a single `%ctor` (bottom of `YTLite.x`) for load-time setup. Private YouTube classes/selectors not covered by the YouTubeHeader project are forward-declared in `YTLite.h` / `YouTubeHeaders.h`. `Sideloading.x` wraps its hooks in a `%group` that is `%init`-ed only when running sideloaded.
+
+**Settings pattern — `ytlBool()`.** All feature flags live in `YTLUserDefaults` (suite `com.dvntm.ytlite`). `YTLite.h` defines the accessors used everywhere:
+- `ytlBool(@"key")` / `ytlInt(@"key")` — read
+- `ytlSetBool(v,@"key")` / `ytlSetInt(v,@"key")` — write
+
+Every hook guards its effect on a flag, e.g. `if (ytlBool(@"noAds")) …`. Defaults are declared once in `-[YTLUserDefaults registerDefaults]`.
+
+The settings screen is built in `Settings.x` by `-[YTSettingsSectionItemManager updateYTLiteSectionWithEntry:]`. Simple toggle rows use the `%new` helper `-[YTSettingsSectionItemManager switchWithTitle:key:]`, which binds a switch to a defaults key. Multi-choice rows (rate, quality, startup tab, language) are **not** switches — they use `detailTextBlock`/`selectBlock` and push a `YTSettingsPickerViewController`. Some whole sections are gated behind `ytlBool(@"advancedMode")`.
+
+**Localization — `LOC()`.** `LOC(@"Key")` resolves against `NSBundle.ytl_defaultBundle` (the injected `YTLite.bundle`). Keys are self-documenting English identifiers; strings live in `layout/Library/Application Support/YTLite.bundle/<lang>.lproj/Localizable.strings`. To list all keys in use: `grep -o 'LOC(@"[^"]*")' *.x`.
+
+**Optional tweaks as submodules.** Bundled features that are their own upstream projects are git submodules under `tweaks/` (see `.gitmodules`): PoomSmart's `YouGroupSettings`, `YTVideoOverlay`, `Return-YouTube-Dislikes`, `YTABConfig`, `YouQuality`; `DontEatMyContent` (therealFoxster); `YTUHD` (Tonwalter888); `iSponsorBlock` (Galactic-Dev); and `Alderis` (hbang — the color-picker framework iSponsorBlock depends on). They are built independently and injected alongside the main tweak — the core `YTLite` tweak does not link against them.
+
+## 4. Build & inject workflow
+
+**Prerequisites (local):** a working [Theos](https://theos.dev) install (`$THEOS` set), the **iOS 16.5 SDK** in `$THEOS/sdks`, and these header sources where the build expects them:
+- PoomSmart's YouTubeHeader cloned to `../YouTubeHeader` (relative to repo root)
+- protobuf `v3.25.8` cloned to `../protobuf`
+- For optional tweaks: PoomSmart's `PSHeader` in `$THEOS/include/PSHeader` (and YouTubeHeader copied into `$THEOS/include/`)
+
+**Build the core tweak:**
+```bash
+git submodule update --init --recursive     # only if building optional tweaks
+make clean package DEBUG=0 FINALPACKAGE=1    # → packages/com.dvntm.ytlite_*.deb
+```
+Makefile facts: `TWEAK_NAME = YTLite`, `ARCHS = arm64`, target `iphone:clang:latest:13.0`, `-fobjc-arc`, `-DTWEAK_VERSION` from `PACKAGE_VERSION`, and `YTLite_FILES = $(wildcard *.x Utils/*.m)` (new `.x` files at the root and `.m` files in `Utils/` are picked up automatically). Pass `ROOTLESS=1` for the rootless package scheme.
+
+**Inject into a YouTube IPA with cyan** (asdfzxcvbn's pyzule-rw). Each deb/dylib/framework is a separate `-f` argument:
+```bash
+cyan --overwrite -i youtube.ipa -o LibreYTLite.ipa \
+  -f packages/com.dvntm.ytlite_*.deb \
+     tweaks/YTUHD/packages/*.deb  ...other tweak debs... \
+     tweaks/iSponsorBlock/packages/*.deb \
+     tweaks/Alderis/libcolorpicker.dylib \
+     tweaks/Alderis/.theos/obj/install_Alderis.xcarchive/Products/Library/Frameworks/Alderis.framework
+```
+iSponsorBlock is special: build `tweaks/Alderis` first, copy its `libcolorpicker.dylib` into `$THEOS/lib` **before** building `tweaks/iSponsorBlock`, and inject **both** `libcolorpicker.dylib` and `Alderis.framework` alongside the iSponsorBlock deb or it crashes on launch. (Alderis' `lcpshim`/libcolorpicker needs the `Preferences` private framework, which only exists in Theos' 16.5 SDK, not the Xcode SDK.)
+
+**GitHub Actions path (`.github/workflows/build.yml`)** — the supported/reproducible build. `workflow_dispatch` inputs: `ipa_url` (decrypted YouTube IPA), `display_name`, `bundle_id`, and `enable_*` toggles per optional tweak. Two jobs:
+1. **build** (macOS): installs deps, restores/pins Theos at `9bc73406…`, fetches the 16.5 SDK, clones YouTubeHeader/protobuf, `make package` for `YTLite`, then conditionally builds each enabled submodule tweak (plus its deps) and uploads all `*.deb`/`*.dylib`/`*.framework` as an artifact.
+2. **package** (macOS): downloads the artifacts + the user's IPA, `pipx install`s cyan, and injects everything into the final IPA. Mirror this job structure when adding a new optional tweak.
+
+## 5. Adding a hook or a setting
+
+Adding a **hook**: forward-declare any unknown class/selector in `YTLite.h` (or import it via `YouTubeHeaders.h` if PoomSmart's headers already cover it), add a `%hook … %end` block in `YTLite.x` under the relevant section banner, and gate its effect behind `ytlBool(@"yourKey")` so it can be toggled.
+
+Adding a **setting** end-to-end:
+1. Register its default in `-[YTLUserDefaults registerDefaults]` (`Utils/YTLUserDefaults.m`).
+2. Add a toggle row in the right section of `Settings.x`, e.g. `[self switchWithTitle:@"YourTitleKey" key:@"yourKey"]` (or a `detailTextBlock`/`selectBlock` row for a multi-choice setting).
+3. Add `YourTitleKey` (and its `…Desc` description key, if used) to `layout/Library/Application Support/YTLite.bundle/en.lproj/Localizable.strings`.
+4. Read it in the hook with `ytlBool(@"yourKey")`.
+
+## 6. Hard-won gotchas
+
+- **EML / ASDK identifiers drift between YouTube versions — match broadly.** Feed cells, ads, and buttons are EML `elementRenderer`s (YouTube 19+); identify them by substring-scanning `-[… description]` against **arrays of candidate fragments** (see `isAdElementRenderer` and the `adStrings` / shorts arrays), not exact equality. Ads also expose `compatibilityOptions.hasAdLoggingData` — check that too. Never hardcode a single full identifier; it will break on the next app update.
+- **Gesture recognizers on feed cells must be coordinated, scroll-gated, and non-cancelling.** Injected long-presses/taps on an `_ASDisplayView` compete with YouTube's own recognizers on the same view. Use the shared `YTLGestureCoordinator` delegate (returns `YES` from `shouldRecognizeSimultaneouslyWithGestureRecognizer:`), set `cancelsTouchesInView = NO` and `delaysTouchesBegan/Ended = NO` (see `ytlConfigureLongPress()`), and bail out of the handler when an enclosing scroll view `isDragging`/`isDecelerating` (`ytlEnclosingScrollActive()`) so a scroll-stopping tap isn't misread as an interaction. A native single-tap is delivered as raw `touchesBegan/Ended`, so a delegate-less recognizer with default `delaysTouchesEnded` will *suppress* it.
+- **Google image CDN: rewrite to `=s0` for full-res.** ggpht / googleusercontent URLs carry a size/crop token after the first `=` (e.g. `=s800-c-fcrop64=…`). Replace the whole token with `=s0` (original, uncropped) via `ytSizedURLString()` / `ytMaxResURLString()`; use `=s2048` for a fast progressive preview. Leave non-Google URLs (`i.ytimg.com`, `/vi/` video thumbnails) untouched.
+- **Photos save needs read-write authorization.** This app's Info.plist has no `NSPhotoLibraryAddUsageDescription`, so the shared save path (`ytlEnsurePhotosAuth`) requests `PHAccessLevelReadWrite` (with the pre-iOS-14 fallback) before `performChanges:`, and saves the original downloaded **bytes** via `addResourceWithType:` — not `creationRequestForAssetFromImage:` (which re-encodes and fails with `PHPhotosErrorInvalidResource` 3302) and not `UIImageWriteToSavedPhotosAlbum` (needs the missing add-only key).
+- **Community-post images load lazily — capture URLs at feed time.** A multi-image post's attachment is an EML `elementRenderer` (not a plain image array), and its images render lazily so they aren't reachable from the view tree when tapped. `ytlScanAndCacheImages()` (called from the `YTIElementRenderer` `elementData` hook, cheaply gated on the `fcrop64` byte marker) parses the raw EML bytes and caches the ordered, `=s0`-normalized URL group in `gYTLImageGroups`; the tap handler looks the tapped URL up to page the whole set in `YTLImageViewer`.
+- **`YTL_POST_DEBUG` compile flag** enables `[YTLITE]`-prefixed diagnostics: `YTLDBG(...)` maps to `os_log(… "%{public}@" …)` (plain `NSLog` redacts dynamic values as `<private>`, and `%{public}@` is rejected by `-Werror` outside `os_log`). Off in release; build with `ADDITIONAL_CFLAGS="-DYTL_POST_DEBUG"` to trace feed/post capture, then read on device with `log stream --predicate 'eventMessage CONTAINS "YTLITE"'`.
+- **`-Werror` is on.** Warnings fail the build: no deprecated-API calls, no unused code/variables/parameters. Clean up dead branches and unused locals before committing.
+
+## 7. Reverse-engineering the current YouTube binary
+
+Identifiers change across YouTube releases, so re-derive them from the actual binary rather than trusting old constants:
+- `ipsw macho info --objc <YouTube binary>` — dumps the Objective-C class/protocol/method layout (the primary way to confirm a class name, selector, or property before hooking it). `otool` (`-ov`, `-L`, `-s __TEXT __cstring`) covers ObjC sections, linked libraries, and embedded C strings.
+- Cross-check against PoomSmart's YouTubeHeader, which tracks many of these across versions.
+- Do **not** try to lift identifiers from the closed YTLite 5.x binary: it XOR-obfuscates its strings, so they won't appear in a plain dump. Rebuild them from the clean, live YouTube binary instead — consistent with this fork's from-source, no-obfuscation stance.

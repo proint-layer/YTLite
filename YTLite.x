@@ -65,6 +65,12 @@ static void ytlScanAndCacheImages(NSData *data) {
     }
 }
 
+// ============================================================================
+// ADS, BACKGROUND PLAYBACK & FEED FILTERING
+//   background playback, ad/spam-signal suppression, EML ad-string filtering,
+//   section/shelf ad removal, statement_banner view stripping
+// ============================================================================
+
 // YouTube-X (https://github.com/PoomSmart/YouTube-X/)
 // Background Playback
 %hook YTIPlayabilityStatus
@@ -241,6 +247,10 @@ static NSMutableArray *ytlFilteredSections(NSArray *array) {
 }
 %end
 
+// ============================================================================
+// PREMIUM PROMO / INTERSTITIAL SUPPRESSION
+// ============================================================================
+
 // NOYTPremium (https://github.com/PoomSmart/NoYTPremium)
 // Alert
 %hook YTCommerceEventGroupHandler
@@ -275,6 +285,11 @@ static NSMutableArray *ytlFilteredSections(NSArray *array) {
 %hook YTSurveyController
 - (void)showSurveyWithRenderer:(id)arg1 surveyParentResponder:(id)arg2 {}
 %end
+
+// ============================================================================
+// NAVIGATION BAR & SEARCH
+//   cast disable, nav-button hiding, voice search, search history
+// ============================================================================
 
 // Navbar Stuff
 // Disable Cast
@@ -316,6 +331,12 @@ static NSMutableArray *ytlFilteredSections(NSArray *array) {
 %hook YTPersonalizedSuggestionsCacheProvider
 - (id)activeCache { return ytlBool(@"noSearchHistory") ? nil : %orig; }
 %end
+
+// ============================================================================
+// WATCH PAGE & PLAYER OVERLAY
+//   related videos, sticky navbar, logo, subbar, overlay controls, HUD,
+//   watermarks, miniplayer, progress bar
+// ============================================================================
 
 // Remove Videos Section Under Player
 %hook YTWatchNextResultsViewController
@@ -395,6 +416,10 @@ static NSMutableArray *ytlFilteredSections(NSArray *array) {
 %end
 
 %hook YTColdConfig
+// ============================================================================
+// PLAYER CONFIG FLAGS (YTColdConfig / YTHotConfig)
+// ============================================================================
+
 // Hide Next & Previous buttons
 - (BOOL)removeNextPaddleForSingletonVideos { return ytlBool(@"hidePrevNext") ? YES : %orig; }
 - (BOOL)removePreviousPaddleForSingletonVideos { return ytlBool(@"hidePrevNext") ? YES : %orig; }
@@ -556,6 +581,12 @@ static NSMutableArray *ytlFilteredSections(NSArray *array) {
 - (BOOL)areHintsDisabled { return ytlBool(@"noHints") ? YES : NO; }
 - (void)setHintsDisabled:(BOOL)arg1 { ytlBool(@"noHints") ? %orig(YES) : %orig; }
 %end
+
+// ============================================================================
+// PLAYBACK AUTOMATION
+//   video end-time label, auto-skip shorts, auto quality/speed/fullscreen,
+//   shorts->regular, caption handling, copy-timestamped-link
+// ============================================================================
 
 void addEndTime(YTPlayerViewController *self, YTSingleVideoController *video, YTSingleVideoTime *time) {
     if (!ytlBool(@"videoEndTime")) return;
@@ -758,6 +789,11 @@ void autoSkipShorts(YTPlayerViewController *self, YTSingleVideoController *video
 }
 %end
 
+// ============================================================================
+// MISC UI FIXES & MENU / PLAYER-BUTTON REMOVAL
+//   label fitting, playlist minibar, menu-action removal, under-player buttons
+// ============================================================================
+
 // Fit 'Play All' Buttons Text For Localizations
 %hook YTQTMButton
 - (UILabel *)titleLabel {
@@ -871,6 +907,12 @@ static BOOL findCell(ASNodeController *nodeController, NSArray <NSString *> *ide
 }
 %end
 
+
+// ============================================================================
+// SHORTS
+//   progress bar, startup suppression, element hiding, pinch-to-fullscreen,
+//   shorts-only mode
+// ============================================================================
 
 // Shorts Progress Bar (https://github.com/PoomSmart/YTShortsProgress)
 %hook YTReelPlayerViewController
@@ -1008,6 +1050,13 @@ static BOOL isOverlayShown = YES;
 }
 %end
 
+// ============================================================================
+// COMMUNITY POST: IMAGE URL HELPERS, FULLSCREEN GALLERY & GESTURES
+//   (the multi-image group cache is near the top of this file)
+//   URL sizing, node-tree image lookup, Photos auth/save, YTLZoomView,
+//   YTLImageViewer, long-press action menus, tap-to-open gallery
+// ============================================================================
+
 // Rewrites a Google image CDN URL (ggpht / googleusercontent) to a given size option.
 // The options string follows the first '=' (e.g. "=s800-c-fcrop64=1,…-rw-nd-v1");
 // replacing it drops the crop/downscale. sizeOption is e.g. "=s0" (original) or
@@ -1027,7 +1076,7 @@ static NSString *ytMaxResURLString(NSString *urlString) {
 }
 
 // Returns a node's image URL if it exposes one (ASNetworkImageNode and subclasses,
-// or any node responding to -URL). Skips avatar-sized thumbnails is left to callers.
+// or any node responding to -URL). Filtering out avatar-sized thumbnails is left to callers.
 static NSURL *nodeImageURL(ASDisplayNode *node) {
     if ([node respondsToSelector:@selector(URL)]) {
         id u = [(id)node URL];
@@ -1715,10 +1764,8 @@ static void ytlAddPhotoURLsFromString(NSString *s, NSMutableArray<NSURL *> *out)
 
 // Opens the gallery for the tapped image. If a multi-image group containing it was cached
 // at feed time (from the elementRenderer's EML bytes), pages the whole ordered group
-// starting on the tapped image; otherwise shows just the tapped image. rootView/point are
-// unused now (kept for call-site symmetry).
-static void ytlPresentGalleryForView(UIView *rootView, CGPoint point, NSURL *tapped, UIViewController *host) {
-    (void)rootView; (void)point;
+// starting on the tapped image; otherwise shows just the tapped image.
+static void ytlPresentGallery(NSURL *tapped, UIViewController *host) {
     if (!tapped) return;
     NSString *tappedNorm = ytMaxResURLString(tapped.absoluteString);
     NSMutableArray<NSURL *> *all = [NSMutableArray array];
@@ -1826,7 +1873,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
            hv ? NSStringFromClass([hv class]) : @"nil", url.absoluteString ?: @"(none)");
 #endif
     if (!url) return;
-    ytlPresentGalleryForView(self, point, url, self.keepalive_node.closestViewController);
+    ytlPresentGallery(url, self.keepalive_node.closestViewController);
 }
 
 %new
@@ -1891,9 +1938,8 @@ static BOOL ytlDescIsPost(NSString *desc) {
         }]];
 
         if (URL) {
-            CGPoint pressPoint = [sender locationInView:self];
             [sheetController addAction:[%c(YTActionSheetAction) actionWithTitle:@"Open Image" iconImage:YTImageNamed(@"yt_outline_youtube_search_24pt") style:0 handler:^ {
-                ytlPresentGalleryForView(self, pressPoint, URL, containerNode.closestViewController);
+                ytlPresentGallery(URL, containerNode.closestViewController);
             }]];
 
             [sheetController addAction:[%c(YTActionSheetAction) actionWithTitle:LOC(@"SaveCurrentImage") iconImage:YTImageNamed(@"yt_outline_image_24pt") style:0 handler:^ {
@@ -1970,6 +2016,11 @@ static BOOL ytlDescIsPost(NSString *desc) {
     }
 }
 %end
+
+// ============================================================================
+// PIVOT BAR / TABS
+//   tab removal, Explore re-add, indicators/labels, long-press manage, startup tab
+// ============================================================================
 
 // Remove Tabs
 %hook YTPivotBarView
@@ -2083,6 +2134,10 @@ BOOL isTabSelected = NO;
 }
 %end
 
+// ============================================================================
+// ENGAGEMENT PANEL: COPY VIDEO INFO BUTTON
+// ============================================================================
+
 %hook YTEngagementPanelView
 - (void)layoutSubviews {
     %orig;
@@ -2132,6 +2187,10 @@ BOOL isTabSelected = NO;
 }
 %end
 
+// ============================================================================
+// SPEEDMASTER (long-press to temporarily change playback speed)
+// ============================================================================
+
 CGFloat rateBeforeSpeedmaster = 1.0;
 
 static void manageSpeedmasterYTLite(UILongPressGestureRecognizer *gesture, YTMainAppVideoPlayerOverlayViewController *delegate, YTInlinePlayerScrubUserEducationView *edu) {
@@ -2180,6 +2239,10 @@ static void manageSpeedmasterYTLite(UILongPressGestureRecognizer *gesture, YTMai
 }
 %end
 
+// ============================================================================
+// MISCELLANEOUS (RTL formatting fix, album-cover CDN host fix)
+// ============================================================================
+
 // Disable Right-To-Left Formatting
 %hook NSParagraphStyle
 + (NSWritingDirection)defaultWritingDirectionForLanguage:(id)lang { return ytlBool(@"disableRTL") ? NSWritingDirectionLeftToRight : %orig; }
@@ -2207,12 +2270,6 @@ static NSURL *newCoverURL(NSURL *originalURL) {
     return %orig(newCoverURL(selectedImageURL), newCoverURL(updatedImageURL));
 }
 %end
-
-// %hook ELMImageDownloader
-// - (id)downloadImageWithURL:(id)arg1 targetSize:(CGSize)arg2 callbackQueue:(id)arg3 downloadProgress:(id)arg4 completion:(id)arg5 {
-//     return %orig(newCoverURL(arg1), arg2, arg3, arg4, arg5);
-// }
-// %end
 
 %ctor {
     if (ytlBool(@"shortsOnlyMode") && (ytlBool(@"removeShorts") || ytlBool(@"reExplore"))) {

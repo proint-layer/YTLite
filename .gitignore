@@ -1,7 +1,9 @@
 .theos/
 .DS_Store
 packages/*.deb
+*.deb
 *.ipa
 diff.txt
+console
 HANDOFF.md
 YTClean/
