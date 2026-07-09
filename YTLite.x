@@ -1229,11 +1229,23 @@ static void genImageFromLayer(CALayer *layer, UIColor *backgroundColor, void (^c
 
 // Configures an injected long-press so it never eats a native single-tap.
 static void ytlConfigureLongPress(UILongPressGestureRecognizer *lp) {
-    lp.minimumPressDuration = 0.3;
+    lp.minimumPressDuration = 0.4;
     lp.cancelsTouchesInView = NO;
     lp.delaysTouchesBegan = NO;
     lp.delaysTouchesEnded = NO;
     lp.delegate = [YTLGestureCoordinator shared];
+}
+
+// YES if an enclosing scroll view is actively moving — used to ignore taps/long-presses
+// that are really part of a scroll (e.g. tapping to stop a decelerating feed).
+static BOOL ytlEnclosingScrollActive(UIView *view) {
+    for (UIView *v = view; v; v = v.superview) {
+        if ([v isKindOfClass:[UIScrollView class]]) {
+            UIScrollView *sv = (UIScrollView *)v;
+            if (sv.isDragging || sv.isDecelerating) return YES;
+        }
+    }
+    return NO;
 }
 
 // Depth-first search of the node tree for an image node whose frame contains `p`
@@ -1805,6 +1817,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
 %new
 - (void)postImageTap:(UITapGestureRecognizer *)sender {
     if (sender.state != UIGestureRecognizerStateEnded) return;
+    if (ytlEnclosingScrollActive(self)) return; // ignore taps that are part of a scroll
     CGPoint point = [sender locationInView:self];
     NSURL *url = ytlImageURLForView(self, point);
 #if defined(YTL_POST_DEBUG)
@@ -1856,6 +1869,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
 %new
 - (void)postManager:(UILongPressGestureRecognizer *)sender {
     if (sender.state == UIGestureRecognizerStateBegan) {
+        if (ytlEnclosingScrollActive(self)) return; // ignore holds that begin a scroll
         ELMContainerNode *nodeForLayer = (ELMContainerNode *)self.keepalive_node.yogaChildren[0];
         ELMContainerNode *containerNode = (ELMContainerNode *)self.keepalive_node;
         NSString *text = containerNode.copiedComment;
@@ -1917,6 +1931,7 @@ static BOOL ytlDescIsPost(NSString *desc) {
 %new
 - (void)commentManager:(UILongPressGestureRecognizer *)sender {
     if (sender.state == UIGestureRecognizerStateBegan) {
+        if (ytlEnclosingScrollActive(self)) return;
         ELMContainerNode *containerNode = (ELMContainerNode *)self.keepalive_node;
         NSString *comment = containerNode.copiedComment;
 
